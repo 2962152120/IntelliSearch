@@ -3,6 +3,8 @@
 面向大模型的自研联网检索工具。输入关键词或自然语言问题，输出**可直接作为大模型上下文引用**的结构化检索结果。
 
 ```bash
+git clone https://github.com/2962152120/IntelliSearch.git
+cd IntelliSearch
 pip install -r requirements.txt
 PYTHONPATH=src python -m intellisearch.cli "铭凡 UM880 Pro 的 NPU 算力多少" --top-k 5
 ```
