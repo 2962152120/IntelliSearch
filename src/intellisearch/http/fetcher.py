@@ -282,11 +282,23 @@ class SmartFetcher:
             "render_enabled": self.cfg.render_enabled,
             "render_available": self.render_available(),
             "engine": self.render_engine(),
+            # 实际内核的绝对路径: 确认"用的是包内内置内核还是系统浏览器"
+            "engine_detail": self._render_detail(),
             "headless": self.cfg.render_headless,
             "max_pages": self.cfg.render_max_pages,
             "block_resources": self.cfg.render_block_resources,
             "stats": dict(self.stats),
         }
+
+    def _render_detail(self) -> str:
+        """内核绝对路径(排障用)。渲染不可用时返回空串, 不抛异常。"""
+        p = self.pool
+        if not p:
+            return ""
+        try:
+            return p.engine_detail
+        except Exception:                       # noqa: BLE001
+            return ""
 
     # ---------- 渲染"无效主机"记忆 ----------
     def _note_render(self, url: str, r) -> None:

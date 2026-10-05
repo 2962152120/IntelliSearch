@@ -74,6 +74,38 @@ def test_needs_render_false_for_normal_article():
     assert needs_render(html) is False
 
 
+def test_needs_render_nav_shell_below_min_text():
+    """纯导航骨架页(全文可见文字不足 min_text)必须判为要渲染。
+
+    实测东方财富行情页 HTTP 直取: 20962 字节 HTML / 全文 1057 字符可见文本,
+    全是导航, 正文靠 JS 异步拉取。
+    它还有个放大器: 该页前 20KB 恰好截断在一个**未闭合标签**中间, 正则
+    `<[^>]+>` 匹配不到收尾的 `>`, 于是标签内部的属性文本被当成可见文字,
+    实测 n_head=1200 > n_full=1057 —— 正好把 `n < min_text` 顶翻而漏判。
+    这里按同样的形态构造, 锁住"按全文统计"这一行为。
+    """
+    nav = "行情中心" * 265                          # 1060 字符真实可见文本
+    shell = '<div class="' + "x" * 30000 + '"></div>'  # 截断点会落在标签内部
+    html = f"<html><body><nav>{nav}</nav>{shell}</body></html>"
+    assert len(html) > 1500
+    assert needs_render(html) is True, \
+        f"导航骨架页应判渲染, len={len(html)}"
+
+
+def test_needs_render_reads_full_document_not_prefix():
+    """可见文本必须按**全文**统计, 不能只取前 20KB。
+
+    否则"开头全是脚本、正文在后面"的正常文档会被误判成骨架页而白付渲染成本
+    —— 分子是全文长度, 分母却用前 20KB 文本, 两者口径不一致。
+    """
+    head_block = "<script>" + ("var a=1;" * 2400) + "</script>"   # 约 19KB, 零文本
+    body = "<p>" + ("这是一段足够长的正文内容。" * 130) + "</p>"    # 约 1690 字符
+    html = f"<html><body>{head_block}{body}</body></html>"
+    assert len(html) > 1500
+    assert needs_render(html) is False, \
+        "正文充足的真实文档不该判渲染(前缀统计会误判)"
+
+
 # ==================================================================
 # 降级判定(离线)
 # ==================================================================

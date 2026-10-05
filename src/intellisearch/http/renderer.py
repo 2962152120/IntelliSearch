@@ -208,8 +208,9 @@ class BrowserRenderer:
         exe, src = self._discover_executable()
         if not exe:
             self._init_error = ("未找到 Chromium 内核。请执行 "
-                                "`python -m playwright install chromium`，"
-                                "或设置环境变量 IS_CHROME_PATH 指向本机 Chrome/Edge")
+                                "`python scripts/install_browser.py` 把内核装进包目录"
+                                "(随包分发, 约 150MB), 或设置环境变量 "
+                                "IS_CHROME_PATH 指向本机 Chrome/Edge")
             return False
         self.executable_path = exe
         self._engine_name = src
@@ -687,7 +688,15 @@ def needs_render(html: str, status_code: int = 200,
 
     # 文本密度判据(只对有实际体积的页面有意义)
     if len(html) > 1500:
-        text = re.sub(r"(?s)<(script|style|noscript)[^>]*>.*?</\1>", " ", head)
+        # 口径必须一致: 分子是**全文**长度, 分母就得也是**全文**可见文本。
+        # 早先分母只取前 20KB(head), 造成两个偏差:
+        #   - 长文档(92KB 正文页, 前 20KB 只有 1364 字)被算成 67:1, 是靠
+        #     n<min_text 不成立才侥幸没误判;
+        #   - 导航骨架页(东方财富 20962B/1200 字)恰好卡在 n<min_text 上,
+        #     上游页面字数从 1199 漂到 1200 就漏判成"不用渲染"(实测复现)。
+        # 统一口径后: 真实文章 6.2:1, 骨架页 19.8:1, 分界清晰。
+        body = html if len(html) <= 400000 else html[:400000]
+        text = re.sub(r"(?s)<(script|style|noscript)[^>]*>.*?</\1>", " ", body)
         text = re.sub(r"(?s)<[^>]+>", " ", text)
         n = len(re.sub(r"\s+", " ", text).strip())
         if n < 400 and len(html) > 3 * max(n, 1):

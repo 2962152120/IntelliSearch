@@ -18,6 +18,10 @@ ENV/
 
 # ---- 测试 / 覆盖率 ----
 .pytest_cache/
+# pytest --basetemp: 刻意放在项目内而非 %TEMP%。
+# 环境的删除保护钩子会拦截 Temp\pytest-of-ASUS 下的批量清理并超时,
+# 导致进程在打印测试摘要之前被中断(表现为"跑完了但看不到 passed 行数")
+.pytest-tmp/
 .coverage
 .coverage.*
 htmlcov/

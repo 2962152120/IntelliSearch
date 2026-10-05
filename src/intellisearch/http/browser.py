@@ -12,11 +12,16 @@
   "Executable doesn't exist"), 而完整版内核其实还在, 只是版本号对不上。
 因此这里以"可用性"而非"版本号"来挑内核, 每种候选都做真实启动探测。
 
-内核来源优先级(全部本地, 零外部依赖):
+内核来源优先级(全部本地, 零外部依赖, 零 API Key):
     1. 显式配置 browser_path / IS_BROWSER_PATH / IS_CHROME_PATH
-    2. 系统浏览器(Edge / Chrome / Chromium / Brave)
-    3. Playwright 缓存目录中任意版本的完整 chromium
-    4. Playwright 期望的 bundled 内核
+    2. **随包分发的内置 chromium**(playwright 自带, 见 scripts/install_browser.py)
+    3. ms-playwright 缓存目录中任意版本的完整 chromium
+    4. 系统浏览器(Edge / Chrome / Chromium / Brave) —— 仅作兜底
+
+内置化说明: 执行 ``python scripts/install_browser.py`` 后, chromium 落在
+site-packages/playwright/driver/package/.local-browsers/ 下, 随 venv 一起
+分发到任何机器, 不要求目标机器预装浏览器。目标机器若无内置内核, 仍会
+自动回退到系统浏览器, 行为与旧版完全一致。
 """
 from __future__ import annotations
 
@@ -161,7 +166,56 @@ def _playwright_browsers() -> List[str]:
     return found
 
 
+# 随包分发的内核, 相对 site-packages/playwright/driver/package/.local-browsers/
+# 刻意用 glob 而非 playwright 自己的 executable_path:
+#   playwright 只有在运行时也设了 PLAYWRIGHT_BROWSERS_PATH=0 才会去包目录找,
+#   否则会报一个不存在的全局缓存路径。这里直接扫目录, 与环境变量无关。
+_PKG_BROWSER_GLOBS = [
+    # 完整内核(真实渲染用)
+    "chromium-*/chrome-win64/chrome.exe",
+    "chromium-*/chrome-win32/chrome.exe",
+    "chromium-*/chrome-win/chrome.exe",
+    "chromium-*/chrome-linux/chrome",
+    "chromium-*/chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+    "chromium-*/chrome-mac-arm64/Chromium.app/Contents/MacOS/Chromium",
+    # 精简 headless 内核(体积更小, 也能用)
+    "chromium_headless_shell-*/chrome-win64/headless_shell.exe",
+    "chromium_headless_shell-*/chrome-linux/headless_shell",
+    "chromium_headless_shell-*/chrome-mac/headless_shell",
+]
+
+
+def _package_browsers() -> List[str]:
+    """扫描 **包内** .local-browsers 目录下的内置 chromium(与环境变量无关)。"""
+    try:
+        import playwright
+    except ImportError:                                  # noqa: F401
+        return []
+    import pathlib
+    root = pathlib.Path(playwright.__file__).resolve().parent \
+        / "driver" / "package" / ".local-browsers"
+    if not root.is_dir():
+        return []
+    found: List[str] = []
+    for pat in _PKG_BROWSER_GLOBS:
+        for hit in root.glob(pat):
+            if hit.is_file():
+                found.append(str(hit))
+    # 版本号大的优先(chromium-1243 > chromium-1210)
+    found.sort(key=_version_of, reverse=True)
+    return found
+
+
 def _playwright_bundled() -> Optional[str]:
+    """返回随包分发的内置 chromium 路径; 没有则返回 None。
+
+    两段式:
+      1. 直接扫包目录(不依赖 PLAYWRIGHT_BROWSERS_PATH, 最可靠);
+      2. 兜底用 playwright 自己的 executable_path(仅当运行时也设了 =0 才有效)。
+    """
+    for p in _package_browsers():
+        return p
+
     try:
         from playwright.sync_api import sync_playwright
     except Exception:                                    # noqa: BLE001
@@ -207,6 +261,17 @@ def find_chromium(explicit: str = "", probe: bool = False) -> Optional[str]:
 
 
 def _candidates(explicit: str = "") -> List[BrowserCandidate]:
+    """按"可移植性"排序候选内核。
+
+    顺序: 显式指定 → **playwright 自带 chromium** → ms-playwright 缓存 →
+    系统浏览器。
+
+    为什么把自带内核提到系统浏览器之前:
+        自带内核随包安装(PLAYWRIGHT_BROWSERS_PATH=0 时落在 site-packages 内),
+        行为在所有机器上一致; 而系统 Edge/Chrome 各版本差异很大, 换台机器
+        可能就没有, 或版本与 playwright 不兼容。要让"装完就能跑"成立,
+        应当优先用包内那份。
+    """
     out: List[BrowserCandidate] = []
     seen = set()
 
@@ -216,19 +281,31 @@ def _candidates(explicit: str = "") -> List[BrowserCandidate]:
             seen.add(key)
             out.append(c)
 
-    # 1) 显式指定
+    # 1) 显式指定(最高优先级: 用户明确要求)
     for p in (explicit, os.getenv("IS_BROWSER_PATH"), os.getenv("IS_CHROME_PATH")):
         if p and os.path.exists(p):
             add(BrowserCandidate(kind="path", name="Chromium(指定)",
                                  executable_path=os.path.abspath(p), source="config"))
 
+    # 2) playwright 自带 chromium —— 随包安装, 跨机器行为一致
+    b = _playwright_bundled()
+    if b:
+        add(BrowserCandidate(kind="path", name="Chromium(内置)",
+                             executable_path=b, source="playwright-bundled"))
+
+    # 3) ms-playwright 缓存里任意版本的完整 chromium
+    for p in _playwright_browsers():
+        add(BrowserCandidate(kind="path", name="Chromium(缓存)",
+                             executable_path=p, source="ms-playwright-cache"))
+
+    # 4) 系统浏览器(兜底: 上面都没有时, 复用用户已装的)
     if sys.platform == "win32":
         for name, ch, rel in _WIN_PAIRS:
             for root in _WIN_ROOTS:
                 p = os.path.join(root, rel.replace("/", os.sep))
                 if os.path.isfile(p):
-                    # 系统浏览器一律用 path 启动: 不依赖 playwright 是否认识该 channel,
-                    # 也不受版本匹配限制
+                    # 系统浏览器一律用 path 启动: 不依赖 playwright 是否认识该
+                    # channel, 也不受版本匹配限制
                     add(BrowserCandidate(kind="path", name=name,
                                          executable_path=p, source="system"))
     elif sys.platform == "darwin":
@@ -247,17 +324,6 @@ def _candidates(explicit: str = "") -> List[BrowserCandidate]:
             if w:
                 add(BrowserCandidate(kind="path", name=name,
                                      executable_path=w, source="which"))
-
-    # 2) playwright 缓存中任意版本的完整 chromium
-    for p in _playwright_browsers():
-        add(BrowserCandidate(kind="path", name="Chromium",
-                             executable_path=p, source="ms-playwright-cache"))
-
-    # 3) playwright 期望的 bundled 内核(放最后: 版本可能不匹配)
-    b = _playwright_bundled()
-    if b:
-        add(BrowserCandidate(kind="path", name="Chromium(bundled)",
-                             executable_path=b, source="playwright-bundled"))
     return out
 
 
@@ -596,6 +662,8 @@ class BrowserPool:
         return {
             "available": self.available(),
             "engine": self.engine_name() if not self._init_error else "none",
+            # 实际用的内核绝对路径: 排障时确认"用的是包内那份还是系统那份"
+            "engine_detail": self.engine_detail if not self._init_error else "",
             "headless": self.headless,
             "max_pages": self.max_pages,
             "unavailable_reason": self._init_error,

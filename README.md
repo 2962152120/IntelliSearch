@@ -269,15 +269,55 @@ rust async runtime -tokio → rust async runtime       （排除词生效）
 `test_all_providers_reachable`（≥2 源可用）标了 `xfail(strict=False)`——
 上游软封时它会显示为 xfail 而不是让整个套件常红，但一旦是真实回归仍然会暴露。
 
-### 4.5 内置网页渲染（零 API Key）
+### 4.5 网页渲染（零 API Key，内核随包安装）
 
-搜索引擎给的是「索引快照」，正文常常抓不到。三条实测数据说明为什么必须内置浏览器内核：
+搜索引擎给的是「索引快照」，正文常常抓不到。三条实测数据说明为什么必须用浏览器内核：
 
 | 目标 | 轻量 HTTP | Headless Chromium |
 |---|---|---|
 | 知乎搜索页 | **403 / 584 B** | 200 / **43,502 B** |
-| 东方财富行情页 | 200 / 20,963 B，但可见文字仅 **1,199** 字符（全是导航） | 200 / **102,028 B** |
+| 东方财富行情页 | 200 / 20,963 B，但全文可见文字仅 **1,057** 字符（全是导航） | 200 / **102,028 B** |
 | `quotes.toscrape.com/js/` | 200 / 骨架页，无 `.quote` 节点 | 200 / 完整 10 条数据 |
+
+#### 4.5.0 内核从哪来：随包安装，不依赖目标机器
+
+Chromium 内核**不随 pip 包一起下发**（PyPI 包体积限制），但可以由一条命令装进
+包目录，从而随虚拟环境 / Docker 镜像一起分发：
+
+```bash
+pip install -r requirements.txt
+pip install playwright
+python scripts/install_browser.py          # 装 chromium（约 150MB，仅首次）
+python scripts/install_browser.py --check  # 只检查，不下载
+python scripts/install_browser.py --launch # 检查并真实启动一次内核
+python scripts/install_browser.py --mirror # 官方 CDN 不通时改走 npmmirror
+```
+
+脚本会**依次尝试官方 CDN → npmmirror 镜像**（国内网络下官方
+`cdn.playwright.dev` 常在长传输中被掐断，报 `Download failed: server closed
+connection`，此时加 `--mirror` 直接走镜像即可）。
+
+该脚本设置 `PLAYWRIGHT_BROWSERS_PATH=0`，把内核装进
+`site-packages/playwright/driver/package/.local-browsers/`，因此：
+
+- 目标机器**无需预装** Edge / Chrome，装完即可渲染；
+- 内核版本与本环境 playwright 严格一致，不会出现"期望 chromium-1243 但只有
+  chromium-1210"这类不匹配；
+- Docker 镜像同理自包含（见 `Dockerfile`）。
+
+**发现顺序**（`http/browser.py: find_chromium`）：
+
+| 优先级 | 来源 | 说明 |
+|---|---|---|
+| 1 | 显式指定 `IS_BROWSER_PATH` / `IS_CHROME_PATH` | 用户明确指定时最优先 |
+| 2 | **包内自带 chromium** | 随包安装，跨机器行为一致 |
+| 3 | `ms-playwright` 缓存 | 任意版本的完整内核，版本号降序 |
+| 4 | 系统浏览器 | Edge / Chrome / Chromium，作为兜底 |
+| — | 都没有 | 返回 `None`，退回纯 HTTP 并如实上报原因 |
+
+> **未装内核时不会静默假装正常**：`reason="渲染内核不可用"`、
+> `unavailable_reason` 会出现在 `/render-info` 里，JS 动态页面只能拿到骨架页。
+> `scripts/install_browser.py --check` 可随时确认状态。
 
 #### 4.5.1 三级降级链
 
@@ -291,7 +331,7 @@ rust async runtime -tokio → rust async runtime       （排除词生效）
                 │ _looks_incomplete() 判定为 JS 骨架/空正文
                 ▼
     ┌───────────▼────────────┐
-    │ Tier 2  Headless Chromium│  Playwright 驱动系统 Edge/Chrome
+    │ Tier 2  Headless Chromium│  Playwright 驱动包内 chromium
     │   browser → renderer     │  执行 JS、等待选择器、拦资源
     └───────────┬────────────┘
                 │ 内核不可用 / 超时 / 被拦 / 返回空
@@ -318,7 +358,7 @@ f.fetch(url, mode="render")  # 强制渲染，即使 HTTP 已拿到内容也走�
 
 1. **HTTP 层被挡** —— 403 / 429 / 5xx
 2. **框架挂载点存在** —— `id="root"` / `id="app"` / `__NEXT_DATA__` / `__NUXT__` / `__INITIAL_STATE__` / `ng-version` / `v-cloak`（不受页面长度限制，短骨架页同样命中）
-3. **文本密度过低** —— `可见文字 < 400 且 HTML > 3×文字`，或 `可见文字 < 1200 且 HTML > 8×文字`（覆盖东方财富这类"无框架标记但正文靠异步拉取"的页面）
+3. **文本密度过低** —— `可见文字 < 400 且 HTML > 3×文字`，或 `可见文字 < 1200 且 HTML > 8×文字`（覆盖东方财富这类"无框架标记但正文靠异步拉取"的页面）。**可见文字按全文统计**（封顶 400KB），不取前缀 —— 分子是全文长度，分母若只用前 20KB 就成了两个口径：长文档会被算成 67:1 而只能靠阈值兜底，导航骨架页则会因前缀里截断到未闭合标签、把属性文本当成正文而正好顶翻阈值（实测该页 `n_head=1200 > n_full=1057`，卡在 `1200 < 1200` 上漏判）。统一口径后真实文章 6.2:1、骨架页 19.8:1，分界清晰
 4. **验证页 / 加载占位** —— `captcha` / `安全验证` / `人机验证` / `unusual traffic`，或整页只有"加载中 / Just a moment"
 
 阈值是刻意放宽的：宁可多渲染一次（多花 ~2 秒），也不要给 AI 返回一个只有导航菜单的空正文。
@@ -347,18 +387,20 @@ f.fetch(url, mode="render")  # 强制渲染，即使 HTTP 已拿到内容也走�
 不记这笔账就要反复白等 5~10 秒。超时类抖动不记（那是瞬时故障）；
 用户显式 `mode="render"` 也不受此限制（内部省时间的启发式不能覆盖对外契约）。
 
-#### 4.5.3 Chromium 内核发现（不下载任何东西）
+#### 4.5.3 内核发现：按"可移植性"排序
 
-`playwright` 库只是驱动层，真正的内核来自本机。发现顺序：
+发现顺序见 4.5.0 的表。核心取舍：
 
-| 优先级 | 来源 | 说明 |
-|---|---|---|
-| 1 | `IS_BROWSER_PATH` 环境变量 | 显式指定 |
-| 2 | **系统浏览器** | Windows 扫 `Program Files` / `LOCALAPPDATA` 下的 Edge、Chrome、Chrome Beta、Chromium、Brave；macOS/Linux 同理 |
-| 3 | ms-playwright 缓存 | 递归扫 `chromium-*/chrome-win*/chrome.exe`，**按版本号降序取任意版本** |
-| 4 | playwright bundled | 库期望的版本，可能与本机缓存不匹配 |
+**为什么包内内核优先于系统浏览器**：系统 Edge / Chrome 各版本差异很大，
+换台机器可能没装、或版本与 playwright 不兼容。包内那份随包分发，行为一致，
+"装完就能跑"才成立。系统浏览器降为兜底——本机没装内核时仍能跑，
+只是失去跨机器一致性。
 
-**为什么按"可用性"而不是版本号挑**：实测本机 playwright 1.63 期望 `chromium-1243`，而本地缓存只有 `chromium-1210`，直接 `launch()` 会报 `Executable doesn't exist` —— 但完整版内核其实就在那儿，只是版本号对不上。改用路径启动（而非 `channel=`）后，系统 Edge 直接可用，**无需 `playwright install` 下载 150MB 内核**。
+**为什么不直接用 `channel="chromium"`**：那样会走 playwright 的版本匹配，
+本机 playwright 1.63 期望 `chromium-1243`，而缓存里只有 `chromium-1210`，
+直接 `launch()` 报 `Executable doesn't exist` —— 完整版内核其实就在那儿，
+只是版本号对不上。**统一用 `executable_path` 启动**绕开版本匹配，
+无论哪来的内核都能跑（实测系统 Edge 借此直接可用）。
 
 #### 4.5.4 线程模型：一个刻意的设计决定
 
@@ -414,12 +456,18 @@ Playwright 的**同步 API 绑定创建它的线程**。最初按常规写法做
 {
   "render_enabled": true,
   "render_available": true,
-  "engine": "msedge",
+  "engine": "chromium",
+  "engine_detail": "chromium[.../site-packages/playwright/driver/package/.local-browsers/chromium-1243/chrome-win64/chrome.exe]",
   "headless": true,
   "max_pages": 4,
   "stats": {"http_ok": 12, "render_ok": 3, "degraded": 1, "failed": 0}
 }
 ```
+
+`engine` 是归一化的浏览器家族名。装了包内内核后实测为 `chromium`
+（未装时若回退到系统浏览器则为 `msedge` / `chrome`）；
+`GET /render-info` 的 `engine_detail` 还会带出完整可执行文件路径，可直接确认
+当前用的是包内那份还是系统那份。
 
 ---
 
@@ -431,10 +479,10 @@ Playwright 的**同步 API 绑定创建它的线程**。最初按常规写法做
 pip install -r requirements.txt     # 基础依赖：httpx
 export PYTHONPATH=src               # 或直接 pip install -e .
 
-# 可选：启用浏览器渲染（不装也能跑，只是没有渲染能力）
+# 启用浏览器渲染（不装也能跑，只是 JS 动态页面会退化成骨架页）
 pip install playwright
-# 不需要 playwright install —— 会自动用系统 Edge/Chrome；
-# 若想用自带内核再执行：python -m playwright install chromium
+python scripts/install_browser.py   # 装 chromium 到包内（约 150MB，仅首次）
+python scripts/install_browser.py --check   # 确认内核状态
 ```
 
 ### 5.2 Docker
@@ -445,7 +493,10 @@ curl "http://127.0.0.1:8787/health"
 curl "http://127.0.0.1:8787/search?q=AMD+Zen5&top_k=5"
 ```
 
-渲染在容器内需要 Chromium。Dockerfile 已装 Debian 的 `chromium` + 中文字体并设 `IS_BROWSER_PATH=/usr/bin/chromium`（比 `playwright install` 的自带内核小得多）；如需精简镜像，可删掉那段并挂载宿主内核。
+渲染内核已装进镜像：`Dockerfile` 用 `PLAYWRIGHT_BROWSERS_PATH=0` 执行
+`playwright install --with-deps chromium`，内核落在 `site-packages` 内，
+容器自包含 —— 换宿主或换基础镜像都不会因缺浏览器而退化成纯 HTTP。
+中文字体（`fonts-noto-cjk` / `fonts-wqy-zenhei`）必须保留，否则中文页渲染出豆腐块。
 
 ### 5.3 三种调用方式
 
@@ -518,15 +569,19 @@ isearch --stats                            # 运行状态
 
 ```bash
 python -m pytest tests/ -q                          # 离线
-python -m pytest tests/ -q --run-integration        # 追加 23 项真实网络/真实渲染
+python -m pytest tests/ -q --run-integration        # 追加 26 项真实网络/真实渲染
 ```
 
 **实测结果（本机，2026-10-06）：**
 
 | 运行方式 | 结果 |
 |---|---|
-| `pytest tests/`（离线） | **240 passed / 27 skipped**，16s |
-| `pytest tests/ --run-integration`（真实网络 + 真实 Chromium） | **264 passed / 2 xfailed / 1 xpassed**，0 failed，140s |
+| `pytest tests/`（离线） | **253 passed / 27 skipped**，151s |
+| `pytest tests/ --run-integration`（真实网络 + **包内 Chromium**） | **276 passed / 1 skipped / 1 xfailed / 2 xpassed**，0 failed，566s |
+
+> 跑测试时若看到"执行完了但没有 passed 统计行"，是环境的删除保护钩子拦了
+> `%TEMP%` 下的 pytest 临时目录清理；本项目已把 `--basetemp=.pytest-tmp`
+> 写进 `pyproject.toml` 的 `addopts`，正常执行即可拿到摘要。
 
 其中 xfail/xpass 的是上游可用性探针（`test_all_providers_reachable`、
 `test_real_search_chinese_yields_enough`、`test_real_search_english_yields_results`）：
@@ -548,7 +603,8 @@ python -m pytest tests/ -q --run-integration        # 追加 23 项真实网络/
 | `test_regression_2026_10_06.py` | **假成功回归**：404/403/验证页不得判成功（`fetch` 与 `_fetch_contents` 两条路径）、失败不写缓存、失败分支 key 契约一致、Crawl-delay 生效且缓存命中不排队、导航容器不得压过正文、分词不得丢失实词、疑问词不产生伪词、垃圾批次逐条过滤 |
 | `test_robots.py` | Allow/Disallow 优先级、通配符与 `$` 锚定、agent 匹配、crawl-delay |
 | `test_render.py` | 内核探测、引擎名、降级链判定、四种抓取模式、真实 SPA 渲染、超时生效、并发渲染、干净降级 |
-| `test_renderer.py` | 候选发现与启动参数形状、`needs_render` 参数化、`_looks_incomplete` 密度判据、接口契约、真实渲染与自动升级、资源拦截、并发 |
+| `test_browser_bundle.py` | **内置内核（11 项）**：包内内核优先级高于系统浏览器、显式路径最优先、缓存高于系统、完全无内核时降级为 `None` 不抛异常、候选去重、安装脚本存在且语法有效、`render` extra 已声明、**包目录扫描不依赖运行时环境变量**、`engine_detail` 在 `pool.info()` 与 `/render-info` 两处都带出内核绝对路径 |
+| `test_renderer.py` | 候选发现与启动参数形状、`needs_render` 参数化、**密度判据按全文统计（骨架页必须判渲染 / 正文充足不得误判）**、`_looks_incomplete` 密度判据、接口契约、真实渲染与自动升级、资源拦截、并发 |
 | `test_relevance_guard.py` | **反爬软封闸门**：整批无关结果被丢弃、多实词需命中≥2 个、仅域名命中不算、单实词查询不误杀、查询词为空不误杀、被判不可用的源如实上报 |
 | `test_integration.py` | 真实中英文检索、多源管道完整性、软封时结果不外泄（`test_irrelevant_results_never_reach_caller`）、多源可用性（≥2 源，`xfail`）、站点/时效过滤、正文抓取、连续检索稳定性、无结果返回明确状态、超时生效 |
 
@@ -568,6 +624,12 @@ python -m pytest tests/ -q --run-integration        # 追加 23 项真实网络/
 
 ## 7. 已知边界
 
+- **内置内核是体积换来的自包含**：解压后约 433MB（下载 195.6MB），装在
+  `site-packages` 内随虚拟环境/镜像分发。官方 CDN 在国内长传输易被掐断
+  （`Download failed: server closed connection`），此时用
+  `python scripts/install_browser.py --mirror` 走 npmmirror。**不装内核也能跑**，
+  只是 JS 动态页面退回骨架页，且 `/render-info` 会如实报
+  `render_available=false` 与原因
 - 内置源依赖第三方页面结构，搜索引擎改版会导致某源解析失效 —— 因此默认启用 4 个源互为备份，失效时状态可见且自动降级；生产环境建议配置 Tavily/SerpAPI 等 JSON API 源
 - 高频使用可能触发目标站点反爬，建议配置 `IS_PROXIES` 代理池并调低 `IS_GLOBAL_QPS`
 - **渲染是单工作线程串行的**：Playwright 同步 API 的线程绑定限制所致，代价是高并发时排队。确需更高吞吐需增加工作线程数（每线程一套 Playwright 实例）
@@ -585,6 +647,8 @@ python -m pytest tests/ -q --run-integration        # 追加 23 项真实网络/
   表现为 `no_results` + 逐源原因（`empty` = 被拦无结果，`irrelevant` = 结果页被替换，
   `error` = 请求失败）。生产环境建议接入 Tavily / SerpAPI 等付费 JSON API 源作为主力，
   免费源作为兜底
-- **软封检测是整批粒度的**：只丢弃"一条都不命中查询词"的整批结果；
-  若上游在正常结果里**混入**少数无关条目，闸门不会拦（要拦就得按比例阈值，
-  而那会误杀排序不佳的真实结果）
+- **软封检测是逐条粒度的**：按"命中 ≥2 个实词 / 单实词查询命中标题摘要 /
+  权威域名例外"逐条判定，无关条目单独剔除，无关结果一条都不会到达调用方；
+  只有**整批**都不命中时才把该源判为 `irrelevant`。若上游在正常结果里
+  **混入**少数弱命中条目，仍可能漏过（要拦就得按比例阈值，而那会误杀
+  排序不佳的真实结果）——这是刻意留的边界，见 4.4

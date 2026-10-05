@@ -16,6 +16,13 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
 server = ["flask>=3.0"]
+# 渲染(JS 动态页面)需要 playwright + chromium 内核。
+# 内核**不随pip 一起下发**, 需执行 `python scripts/install_browser.py`
+# 把 chromium 装进 site-packages(PLAYWRIGHT_BROWSERS_PATH=0), 之后
+# 渲染能力随包走, 不再依赖目标机器是否装了 Edge/Chrome。
+render = ["playwright>=1.40"]
+# 一键装齐:含渲染内核
+all = ["flask>=3.0", "playwright>=1.40"]
 
 [project.scripts]
 isearch = "intellisearch.cli:main"
@@ -28,10 +35,11 @@ where = ["src"]
 testpaths = ["tests"]
 # 不设 -q: 命令行再叠加 -q 会变成 -qq, 而该 verbosity 下 pytest 不打印统计摘要
 # (表现为"跑完了但看不到 passed/failed 行数")。
-addopts = ""
+addopts = "--basetemp=.pytest-tmp"
 markers = ["integration: 需要真实网络的测试"]
 # 把 pytest 的临时目录收在项目内: 默认的 %TEMP%/pytest-of-<user> 会跨项目累积,
 # 堆积到一定数量后, 会话结束时的批量清理会被环境的删除保护拦截,
 # 导致进程在打印测试摘要之前就被中断(表现为"跑了但看不到结果")。
+# --basetemp 指向项目内 .pytest-tmp/ 后, 清理不再走 %TEMP%, 不再被拦截。
 tmp_path_retention_count = 1
 tmp_path_retention_policy = "failed"
