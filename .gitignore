@@ -1,0 +1,74 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# ---- 虚拟环境 ----
+.venv/
+venv/
+env/
+ENV/
+
+# ---- 测试 / 覆盖率 ----
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.tox/
+.hypothesis/
+
+# ---- 类型检查 / lint ----
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+
+# ---- 密钥与本地配置 ----
+# .env.example 是模板(仅占位符)需要提交; 真实 .env 绝不能进仓库
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets.yaml
+secrets.yml
+
+# ---- 运行时产物 ----
+*.sqlite3
+*.sqlite
+*.db
+*.log
+*.pid
+.cache/
+intellisearch_cache/
+
+# ---- 本机/AI 工具工作目录 ----
+# 记忆与工作日志属于本地开发过程, 不应随开源仓库发布
+.workbuddy/
+.claude/
+.cursor/
+.aider*
+.vscode/
+.idea/
+
+# ---- 操作系统 ----
+.DS_Store
+Thumbs.db
+desktop.ini
+*.lnk
+
+# ---- 编辑器临时文件 ----
+*.swp
+*.swo
+*~
+\#*\#
+.\#*

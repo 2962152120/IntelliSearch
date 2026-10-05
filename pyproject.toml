@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "intellisearch"
+version = "1.0.0"
+description = "面向大模型的自研联网检索工具：多源聚合、结构化输出、可直接作为上下文引用"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+    "httpx>=0.24",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+server = ["flask>=3.0"]
+
+[project.scripts]
+isearch = "intellisearch.cli:main"
+intellisearch-mcp = "intellisearch.server.mcp_server:run_stdio"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# 不设 -q: 命令行再叠加 -q 会变成 -qq, 而该 verbosity 下 pytest 不打印统计摘要
+# (表现为"跑完了但看不到 passed/failed 行数")。
+addopts = ""
+markers = ["integration: 需要真实网络的测试"]
+# 把 pytest 的临时目录收在项目内: 默认的 %TEMP%/pytest-of-<user> 会跨项目累积,
+# 堆积到一定数量后, 会话结束时的批量清理会被环境的删除保护拦截,
+# 导致进程在打印测试摘要之前就被中断(表现为"跑了但看不到结果")。
+tmp_path_retention_count = 1
+tmp_path_retention_policy = "failed"

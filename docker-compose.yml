@@ -1,0 +1,32 @@
+services:
+  intellisearch:
+    build: .
+    image: intellisearch:1.0.0
+    container_name: intellisearch
+    ports:
+      - "8787:8787"
+    environment:
+      # 检索源（逗号分隔，按优先级排列）
+      IS_PROVIDERS: "bing_rss,bing_html,sogou,so360"
+      IS_TIMEOUT: "15"
+      IS_RETRIES: "2"
+      IS_MAX_CONCURRENCY: "8"
+      IS_CACHE: "true"
+      IS_CACHE_TTL: "1800"
+      IS_RATE_LIMIT: "true"
+      IS_GLOBAL_QPS: "5"
+      IS_SESSION_QPS: "1"
+      IS_RESPECT_ROBOTS: "true"
+      IS_LOG_LEVEL: "INFO"
+      # 代理池（可选，逗号分隔；支持 http:// 与 socks5://）
+      IS_PROXIES: ""
+      # 商业检索源（可选，配置后自动启用）
+      TAVILY_API_KEY: ""
+      SERPAPI_API_KEY: ""
+      BRAVE_API_KEY: ""
+    volumes:
+      - isearch-data:/data
+    restart: unless-stopped
+
+volumes:
+  isearch-data:
