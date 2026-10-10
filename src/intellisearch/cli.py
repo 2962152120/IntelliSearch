@@ -59,6 +59,17 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    # Windows 在非 UTF-8 代码页(如 en-US 的 cp1252)下, 打印中文帮助/结果会
+    # UnicodeEncodeError 直接崩 —— GitHub 托管的 Windows runner 就是该配置,
+    # 真实用户装在英文系统上同样会踩。统一按 UTF-8 输出(无法编码的字符降级
+    # 而非异常); TTY 场景不受影响(Windows 控制台内部本就走 UTF-16 API),
+    # 管道下游(尤其喂给大模型)拿到的也始终是 UTF-8。
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
     args = _build_parser().parse_args(argv)
 
     if args.verbose:

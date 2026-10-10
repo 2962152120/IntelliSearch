@@ -1,5 +1,8 @@
 # IntelliSearch
 
+[![CI](https://github.com/2962152120/IntelliSearch/actions/workflows/ci.yml/badge.svg)](https://github.com/2962152120/IntelliSearch/actions/workflows/ci.yml)
+[![Integration](https://github.com/2962152120/IntelliSearch/actions/workflows/integration.yml/badge.svg)](https://github.com/2962152120/IntelliSearch/actions/workflows/integration.yml)
+
 面向大模型的自研联网检索工具。输入关键词或自然语言问题，输出**可直接作为大模型上下文引用**的结构化检索结果。
 
 ```bash
