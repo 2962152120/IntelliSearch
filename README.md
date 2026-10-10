@@ -623,6 +623,18 @@ python -m pytest tests/ -q --run-integration        # 追加 26 项真实网络/
 - **渲染不可用不致命**：目标主机完全不存在时 `degraded=True`、`fetch_mode="none"`、`attempts=["http_err:UPSTREAM_ERROR", "render_err:RENDER_ERROR"]`，不抛异常
 - **并发渲染全部成功**：3 个并发渲染 `render_ok: 3, failed: 0`（线程模型修复前为 1/3）
 
+### 持续集成（GitHub Actions）
+
+| workflow | 触发 | 内容 |
+|---|---|---|
+| `ci.yml` | push / PR / 手动 | 离线全量测试矩阵（ubuntu 3.9、ubuntu 3.13、windows 3.13）+ `isearch --help` 冒烟，单轮约 1 分钟 |
+| `integration.yml` | 每日 UTC 02:17（≈ 北京 10:17）/ 手动 | 装包内 Chromium 后跑 `--run-integration` 真实网络全量回归；junit 报告作为 artifact 保留 7 天 |
+
+集成回归刻意**不挂在 push 上**：依赖外部站点、又慢、还有上游波动，不适合做每次提交的门禁。
+首次 CI 实测三条腿全部 `253 passed / 27 skipped`（顺带实证了 `requires-python >= 3.9`），
+并当场暴露、修复了一个真实 bug —— en-US/cp1252 代码页下 `isearch --help` 打印中文
+`UnicodeEncodeError` 崩溃（回归见 `tests/test_cli.py`）。
+
 ---
 
 ## 7. 已知边界
