@@ -1,0 +1,49 @@
+# 离线快速门禁: 每次 push/PR 跑全量离线测试(不依赖真实网络)。
+# 真实网络/真实渲染的回归放在 integration.yml(夜间 + 手动触发),
+# 不让外部站点波动阻塞日常提交。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支连续推送时, 取消上一次还在跑的运行
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline:
+    name: 离线测试 ${{ matrix.os }} / py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 覆盖 requires-python 声明范围的两端 + 开发主平台(Windows)
+          - { os: ubuntu-latest, python: "3.9" }
+          - { os: ubuntu-latest, python: "3.13" }
+          - { os: windows-latest, python: "3.13" }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: 安装依赖与本包
+        run: |
+          python -m pip install -U pip
+          pip install ".[all,dev]"
+
+      - name: 离线测试套件
+        run: python -m pytest tests/ -q
+
+      - name: CLI 入口冒烟
+        run: isearch --help

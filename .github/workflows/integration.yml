@@ -1,0 +1,46 @@
+# 真实网络 + 真实 Chromium 的全量回归。
+# 刻意不挂在 push 上: 依赖外部站点(搜索源/行情页), 又慢又有上游波动,
+# 不适合做每次提交的门禁 —— 夜间跑一次, 需要时也可手动触发。
+name: Integration
+
+on:
+  schedule:
+    # UTC 02:17 ≈ 北京时间每天 10:17
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+jobs:
+  integration:
+    name: 全量回归(真实网络 + 包内 Chromium)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: 安装依赖(含渲染与服务 extra)
+        run: |
+          python -m pip install -U pip
+          pip install ".[all,dev]"
+
+      - name: 安装包内 Chromium(PLAYWRIGHT_BROWSERS_PATH=0)
+        run: python scripts/install_browser.py
+
+      - name: 全量回归(真实网络 + 真实渲染)
+        run: python -m pytest tests/ -q --run-integration --junitxml=test-results.xml
+
+      # 夜间任务没人盯着, 失败时靠报告定位
+      - name: 上传测试报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-report
+          path: test-results.xml
+          retention-days: 7
+          if-no-files-found: ignore

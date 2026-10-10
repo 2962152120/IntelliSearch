@@ -30,7 +30,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 # 不随仓库发布的内容
 SKIP_DIRS = {".git", ".workbuddy", "__pycache__", ".pytest_cache",
-             ".mypy_cache", ".ruff_cache", "node_modules", "dist", "build"}
+             ".mypy_cache", ".ruff_cache", "node_modules", "dist", "build",
+             # pytest --basetemp 的临时目录(见 pyproject 注释), 与本地 gitignore 对齐
+             ".pytest-tmp"}
 SKIP_SUFFIX = {".pyc", ".pyo", ".sqlite3", ".sqlite", ".log"}
 
 
