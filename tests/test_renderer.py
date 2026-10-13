@@ -244,10 +244,49 @@ def test_forced_render_mode():
 
 @pytest.mark.integration
 def test_resource_blocking_saves_traffic():
-    """渲染时应拦截图片/字体/媒体, 大幅降低资源消耗。"""
+    """渲染时应拦截图片/字体/媒体, 大幅降低资源消耗。
+
+    用本地 HTTP 服务提供带图片子资源的页面, 不赌外网 —— 旧实现渲染
+    https://www.baidu.com/ , GitHub 的美国 runner 访问百度时快时慢,
+    2026-10-11 夜间巡检就因 Page.goto 30s 超时误报失败。拦截逻辑
+    (renderer.BLOCKED_RESOURCE_TYPES)只看 resource_type 不看域名,
+    本地页面足以等价验证, 且完全确定性。
+    """
+    import http.server
+    import threading
+
+    html = (b"<html><body><h1>res</h1>"
+            + b"".join(b'<img src="/i%d.png">' % i for i in range(5))
+            + b"</body></html>")
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path.endswith(".png"):
+                body = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+                ctype = "image/png"
+            else:
+                body = html
+                ctype = "text/html; charset=utf-8"
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):   # 静音请求日志
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
     p = BrowserPool()
-    r = p.render(RenderRequest(url="https://www.baidu.com/", timeout=30))
-    assert r.blocked_requests > 0, "未拦截任何资源, 过滤可能未生效"
+    try:
+        r = p.render(RenderRequest(
+            url=f"http://127.0.0.1:{srv.server_address[1]}/", timeout=30))
+        assert r.blocked_requests > 0, "未拦截任何资源, 过滤可能未生效"
+    finally:
+        p.close()
+        srv.shutdown()
+        srv.server_close()
 
 
 @pytest.mark.integration
