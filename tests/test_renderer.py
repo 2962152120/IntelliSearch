@@ -12,7 +12,7 @@ from intellisearch.http.browser import _candidates
 from intellisearch.http.fetcher import SmartFetcher
 from intellisearch.http.renderer import needs_render
 
-from conftest import load_page
+from conftest import STATIC_PAGE_MARKER, load_page
 
 
 # ==================================================================
@@ -43,6 +43,39 @@ def test_find_chromium_returns_path_or_none():
     """不应抛异常: 找不到时返回 None, 找到时返回路径/通道名字符串。"""
     c = find_chromium(probe=False)
     assert c is None or isinstance(c, str)
+
+
+_ENGINE_SOURCES = ("config", "env", "playwright-bundled",
+                   "ms-playwright-cache", "system", "which")
+
+
+@pytest.mark.parametrize("exe,expected", [
+    ("/opt/google/chrome/chrome", "chrome"),
+    ("/usr/bin/microsoft-edge", "msedge"),
+    # playwright 缓存路径同时含 chromium 与 chrome, 必须先判 chromium
+    ("/pkg/.local-browsers/chromium-1243/chrome-linux/chrome", "chromium"),
+])
+def test_engine_name_is_normalized_family_not_source(monkeypatch, exe, expected):
+    """engine 必须是归一化家族名, 不能是候选来源字符串。
+
+    回归(CI 实测): RenderResult.engine 曾输出 "which" —— renderer 把
+    ``_candidates()`` 返回的 source 直接当引擎名了。这与
+    ``BrowserPool.engine_name()`` 的家族名口径、README 的 /stats 契约不一致。
+    """
+    import sys as _sys
+    import types as _types
+
+    from intellisearch.http import renderer as R
+
+    # 本机未装 playwright 时也走同一条 available() 分支: 注入空模块即可
+    monkeypatch.setitem(_sys.modules, "playwright", _types.ModuleType("playwright"))
+    r = R.BrowserRenderer()
+    monkeypatch.setattr(r, "_discover_executable", lambda: (exe, "which"))
+
+    assert r.available() is True
+    assert r.engine == expected
+    assert r.engine not in _ENGINE_SOURCES, "engine 泄漏了候选来源标识"
+    assert r.info()["engine_source"] == "which"
 
 
 # ==================================================================
@@ -172,9 +205,13 @@ def test_pool_rejects_bad_url():
 
 
 def test_pool_info_shape():
-    info = BrowserPool().info()
-    for k in ("available", "engine", "headless", "max_pages", "stats"):
-        assert k in info
+    p = BrowserPool()
+    try:
+        info = p.info()
+        for k in ("available", "engine", "headless", "max_pages", "stats"):
+            assert k in info
+    finally:
+        p.close(timeout=5)
 
 
 # ==================================================================
@@ -183,15 +220,23 @@ def test_pool_info_shape():
 @pytest.mark.integration
 def test_renderer_available():
     p = BrowserPool()
-    assert p.available() is True, p.unavailable_reason()
+    try:
+        assert p.available() is True, p.unavailable_reason()
+    finally:
+        p.close(timeout=5)
 
 
 @pytest.mark.integration
-def test_render_static_page():
+def test_render_static_page(local_site):
+    # 本机静态页: 不再依赖 example.com(GitHub runner 的出口 IP 会被
+    # Cloudflare 回 503, 见 test_render.py 顶部说明)
     p = BrowserPool()
-    r = p.render(RenderRequest(url="https://example.com/", timeout=30))
-    assert r.ok
-    assert "Example Domain" in r.html
+    try:
+        r = p.render(RenderRequest(url=local_site + "/", timeout=30))
+        assert r.ok
+        assert STATIC_PAGE_MARKER in r.html
+    finally:
+        p.close()
 
 
 @pytest.mark.integration
@@ -232,10 +277,10 @@ def test_smart_fetcher_static_stays_http():
 
 
 @pytest.mark.integration
-def test_forced_render_mode():
+def test_forced_render_mode(local_site):
     f = SmartFetcher()
     try:
-        r = f.fetch("https://example.com/", mode="render", timeout=30)
+        r = f.fetch(local_site + "/", mode="render", timeout=30)
         assert r.rendered is True
         assert r.fetch_mode == "render"
     finally:
@@ -290,13 +335,14 @@ def test_resource_blocking_saves_traffic():
 
 
 @pytest.mark.integration
-def test_concurrency_limit_respected():
+def test_concurrency_limit_respected(local_site):
     """并发抓取不应超过配置的页签上限, 且全部能返回。"""
     import time
     from concurrent.futures import ThreadPoolExecutor
     f = SmartFetcher()
     try:
-        urls = ["https://example.com/"] * 3
+        # 本机页面: 并发断言不应变成外部站点可用性探针
+        urls = [local_site + "/"] * 3
         t0 = time.time()
         with ThreadPoolExecutor(max_workers=3) as pool:
             outs = list(pool.map(lambda u: f.fetch(u, mode="render", timeout=30), urls))

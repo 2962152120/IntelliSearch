@@ -502,7 +502,8 @@ class BrowserPool:
                 self._init_error = r.unavailable_reason() or "未找到 Chromium 内核"
                 raise BrowserUnavailable(self._init_error)
             self._renderer = r
-            self._engine_name = _normalize_engine(r.executable_path)
+            # 用 renderer 已归一化的家族名, 避免两处算法漂移
+            self._engine_name = r.engine
             return r
 
     def available(self) -> bool:

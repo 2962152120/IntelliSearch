@@ -44,4 +44,8 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import urllib.request,sys; \
         sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8787/health', timeout=4).status==200 else 1)"
 
-CMD ["python", "-m", "intellisearch.cli", "--serve", "8787"]
+# 容器内必须监听 0.0.0.0, 否则服务只绑回环 127.0.0.1, docker-compose 的
+# "8787:8787" 端口映射从宿主机不可达(README 5.2 里的 curl 会连接失败)。
+# 本机直接跑 CLI 时 --host 默认 127.0.0.1, 保持安全默认; 这里显式放开。
+# HEALTHCHECK 仍走 127.0.0.1 —— 那是容器内自检, 0.0.0.0 监听同样覆盖回环。
+CMD ["python", "-m", "intellisearch.cli", "--serve", "8787", "--host", "0.0.0.0"]

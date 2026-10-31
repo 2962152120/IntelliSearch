@@ -1,11 +1,22 @@
 """渲染层与降级链测试。
 
 离线部分不依赖浏览器; 需要真实渲染的用例标记 integration。
+
+**不依赖外部站点**: 所有抓取/渲染用例都打本机临时 HTTP 服务
+(conftest.py 的 ``local_site`` fixture)。
+2026-10-31 的 CI 集成失败即由外部 example.com 对 GitHub runner 返回
+Cloudflare 503 引起(渲染链路本身正常, 单测却红了两条):
+  - test_render_static_page              -> assert 503 == 200
+  - test_render_concurrent_requests      -> 2/4 (两个 example.com 都 503)
+把被测页面换成本机服务后, 结果只由代码决定, 不再赌外部站点的可用性。
 """
+import time
+
 import pytest
 
+from conftest import SPA_JS_MARKER, STATIC_PAGE_MARKER
 from intellisearch.config import Config
-from intellisearch.http.browser import (BrowserPool, RenderRequest,
+from intellisearch.http.browser import (BrowserPool, RenderError, RenderRequest,
                                         find_chromium)
 from intellisearch.http.fetcher import SmartFetcher
 
@@ -18,14 +29,21 @@ def test_find_chromium_returns_path_or_none():
 
 def test_pool_reports_engine_without_starting():
     pool = BrowserPool(Config(), max_pages=1)
-    name = pool.engine_name()
-    assert isinstance(name, str)
-    assert name in ("msedge", "chrome", "chromium", "chromium-browser",
-                    "playwright-chromium", "google-chrome", "none") or name
+    try:
+        name = pool.engine_name()
+        assert isinstance(name, str)
+        # 归一化家族名; 不能是候选来源(which/system/playwright-bundled...)
+        assert name in ("msedge", "chrome", "chromium", "brave", "none"), name
+    finally:
+        pool.close(timeout=5)
 
 
 def test_pool_available_returns_bool():
-    assert isinstance(BrowserPool(Config()).available(), bool)
+    pool = BrowserPool(Config())
+    try:
+        assert isinstance(pool.available(), bool)
+    finally:
+        pool.close(timeout=5)
 
 
 # ---------------------------------------------------------------- 降级链判定
@@ -62,29 +80,27 @@ def test_static_page_not_flagged():
 
 
 # ---------------------------------------------------------------- 抓取模式
-def test_http_mode_never_touches_browser():
-    """mode=http 时不应启动浏览器。"""
+def test_http_mode_never_touches_browser(local_site):
+    """mode=http 时不应启动浏览器, 且必须真的拿到本机页面的正文。"""
     f = SmartFetcher(Config(render_enabled=True))
     try:
-        o = f.fetch("https://example.com/", mode="http", timeout=12, retries=0)
+        o = f.fetch(local_site + "/", mode="http", timeout=10, retries=0)
         assert o.fetch_mode == "http"
         assert o.rendered is False
-    except Exception:
-        pass          # 网络不可用时跳过断言
+        assert o.ok is True
+        assert STATIC_PAGE_MARKER in o.text
     finally:
         f.close()
 
 
-def test_fetch_outcome_fields_present():
+def test_fetch_outcome_fields_present(local_site):
     f = SmartFetcher(Config(render_enabled=False))
     try:
-        o = f.fetch("https://example.com/", mode="http", timeout=12, retries=0)
+        o = f.fetch(local_site + "/", mode="http", timeout=10, retries=0)
         for attr in ("text", "url", "status", "fetch_mode", "degraded",
                      "attempts", "elapsed_ms", "upgrade_reason"):
             assert hasattr(o, attr), attr
         assert o.attempts, "必须记录逐级尝试轨迹"
-    except Exception:
-        pass
     finally:
         f.close()
 
@@ -119,12 +135,19 @@ def _pool():
     if _SHARED_POOL is None:
         p = BrowserPool(Config(), max_pages=2)
         if not p.available():
-            pytest.skip("无 playwright")
+            pytest.skip("无 playwright 或未安装 Chromium 内核")
         _SHARED_POOL = p
     return _SHARED_POOL
 
 
-def pytest_unconfigure(config):
+@pytest.fixture(scope="module", autouse=True)
+def _close_shared_pool():
+    """模块结束时关闭共享浏览器池。
+
+    之前把 pytest_unconfigure 定义在测试模块里 —— pytest 只从 conftest.py /
+    插件收集该钩子, 放在这里永远不执行, 浏览器进程会随会话泄漏。
+    """
+    yield
     global _SHARED_POOL
     if _SHARED_POOL is not None:
         _SHARED_POOL.close(timeout=10)
@@ -132,67 +155,74 @@ def pytest_unconfigure(config):
 
 
 @pytest.mark.integration
-def test_render_spa_page():
+def test_render_spa_page(local_site):
     """SPA 页面必须靠渲染才能拿到 JS 注入的内容。"""
     pool = _pool()
     r = pool.render(RenderRequest(
-        url="https://quotes.toscrape.com/js/", timeout=30,
-        wait_selector=".quote"))
+        url=local_site + "/spa", timeout=25, wait_selector="#app"))
     assert r.status == 200
-    assert r.selector_found is True
-    assert len(r.html) > 6000
-    assert "quote" in r.html.lower()
+    assert SPA_JS_MARKER in r.html, "JS 注入后的内容没有出现在渲染结果里"
+    # engine 必须是归一化家族名(回归: CI 上曾输出候选来源 "which")
+    assert r.engine in ("chromium", "chrome", "msedge", "brave"), r.engine
 
 
 @pytest.mark.integration
-def test_render_static_page():
+def test_render_static_page(local_site):
     pool = _pool()
-    r = pool.render(RenderRequest(url="https://example.com/", timeout=25))
+    r = pool.render(RenderRequest(url=local_site + "/", timeout=25))
     assert r.status == 200 and r.html
+    assert STATIC_PAGE_MARKER in r.html
 
 
 @pytest.mark.integration
-def test_render_timeout_is_enforced():
+def test_render_timeout_is_enforced(local_site):
     """超长加载时间的页面必须在设定时限内失败, 而不是无限等待。"""
-    import time
-    from intellisearch.http.browser import RenderError
     pool = _pool()
     before = pool.stats["timeouts"]
     t0 = time.time()
     with pytest.raises(RenderError):
-        pool.render(RenderRequest(url="https://httpbin.org/delay/10", timeout=5))
+        pool.render(RenderRequest(url=local_site + "/slow", timeout=3))
     elapsed = time.time() - t0
-    assert elapsed < 30, f"超时未在合理时间内生效: {elapsed:.1f}s"
+    assert elapsed < 25, f"超时未在合理时间内生效: {elapsed:.1f}s"
     assert pool.stats["timeouts"] > before
 
 
 @pytest.mark.integration
-def test_render_concurrent_requests():
-    """并发渲染: 验证信号量排队与事件循环并发都正常。"""
+def test_render_concurrent_requests(local_site):
+    """并发渲染: 验证信号量排队与事件循环并发都正常。
+
+    4 个请求全部打到本机服务 —— 之前混用 example.com 时, 上游 503 会让
+    并发成功率断言(>=3)变成外部可用性探针。
+    """
     from concurrent.futures import ThreadPoolExecutor
+
     pool = _pool()
-    urls = ["https://example.com/", "https://quotes.toscrape.com/js/"] * 2
+    urls = [local_site + "/", local_site + "/spa"] * 2
 
     def work(u):
         return pool.render(RenderRequest(url=u, timeout=30))
 
     with ThreadPoolExecutor(max_workers=4) as ex:
         results = list(ex.map(work, urls))
-    ok = [r for r in results if r.status == 200 and r.html]
-    assert len(ok) >= 3, f"并发成功率过低: {len(ok)}/{len(results)}"
+
+    assert len(results) == 4
+    for r in results:
+        assert r.status == 200 and r.html, f"渲染失败: {r.url} status={r.status}"
+    # 两条 SPA 请求必须都拿到了 JS 注入后的内容
+    assert sum(SPA_JS_MARKER in r.html for r in results) == 2
 
 
 @pytest.mark.integration
-def test_fetcher_auto_upgrade_to_render():
+def test_fetcher_auto_upgrade_to_render(local_site):
     """auto 模式遇到 SPA 骨架页应自动升级到渲染。"""
     pool = _pool()          # 确保内核可用
     f = SmartFetcher(Config(render_enabled=True), pool=pool)
     try:
-        o = f.fetch("https://quotes.toscrape.com/js/", mode="auto", timeout=30)
+        o = f.fetch(local_site + "/spa", mode="auto", timeout=30)
         assert o.fetch_mode == "render"
         assert o.rendered is True
         assert o.upgrade_reason
-        assert len(o.text) > 6000
+        assert SPA_JS_MARKER in o.text
     finally:
         f.http.close()
 

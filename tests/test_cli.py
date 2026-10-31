@@ -24,3 +24,46 @@ def test_cli_help_survives_non_utf8_codepage():
         r.stderr.decode("utf-8", "replace")[-800:]
     out = r.stdout.decode("utf-8", "replace")
     assert "检索" in out, f"中文帮助应以 UTF-8 正常输出, 实际开头: {out[:200]!r}"
+
+
+def test_cli_serve_passes_host_and_port(monkeypatch):
+    """--serve 必须把 --host/--serve 透传给 http_api.serve。
+
+    回归: Dockerfile 曾只传 `--serve 8787` → serve() 默认 host="127.0.0.1",
+    容器内只监听回环, docker-compose 的 "8787:8787" 端口映射从宿主机不可达
+    (README 5.2 的 curl 连不上)。main() 里是惰性 import, 所以 patch 必须打在
+    intellisearch.server.http_api 模块属性上, 才能被 `from ... import serve` 取到。
+    """
+    from intellisearch import cli
+    from intellisearch.server import http_api
+
+    calls = []
+
+    def fake_serve(**kw):
+        calls.append(kw)
+
+    monkeypatch.setattr(http_api, "serve", fake_serve)
+
+    assert cli.main(["--serve", "8787", "--host", "0.0.0.0"]) == 0
+    assert len(calls) == 1
+    assert calls[0]["host"] == "0.0.0.0", \
+        f"容器内必须监听 0.0.0.0, 实际传给 serve 的是 {calls[0]['host']!r}"
+    assert calls[0]["port"] == 8787
+
+
+def test_cli_serve_default_host_is_loopback(monkeypatch):
+    """不传 --host 时保持 127.0.0.1 默认, 本机运行不对外暴露。"""
+    from intellisearch import cli
+    from intellisearch.server import http_api
+
+    calls = []
+
+    def fake_serve(**kw):
+        calls.append(kw)
+
+    monkeypatch.setattr(http_api, "serve", fake_serve)
+
+    assert cli.main(["--serve", "8787"]) == 0
+    assert len(calls) == 1
+    assert calls[0]["host"] == "127.0.0.1"
+    assert calls[0]["port"] == 8787

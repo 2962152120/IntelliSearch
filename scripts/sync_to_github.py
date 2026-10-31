@@ -28,11 +28,15 @@ REPO = "2962152120/IntelliSearch"   # 可用 --repo 覆盖(fork 后改这里)
 BRANCH = "main"
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
-# 不随仓库发布的内容
-SKIP_DIRS = {".git", ".workbuddy", "__pycache__", ".pytest_cache",
-             ".mypy_cache", ".ruff_cache", "node_modules", "dist", "build",
-             # pytest --basetemp 的临时目录(见 pyproject 注释), 与本地 gitignore 对齐
-             ".pytest-tmp"}
+# 不随仓库发布的内容(必须覆盖 .gitignore 里的目录, 否则本地 venv/临时目录
+# 会被整包推上去 —— 曾漏掉 .venv, 一次 dry-run 才暴露)
+SKIP_DIRS = {".git", ".workbuddy", ".claude", ".cursor", ".vscode", ".idea",
+             "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+             "node_modules", "dist", "build",
+             # 虚拟环境: 绝不入库
+             ".venv", "venv", "env",
+             # pytest --basetemp / 本地临时产物(见 pyproject 注释)
+             ".pytest-tmp", ".pytest-run-tmp", ".tmp"}
 SKIP_SUFFIX = {".pyc", ".pyo", ".sqlite3", ".sqlite", ".log"}
 
 

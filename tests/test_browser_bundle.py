@@ -24,22 +24,72 @@ def _sources(explicit=""):
             for c in B._candidates(explicit)]
 
 
+# 系统浏览器候选的两种 source: Windows 分支叫 "system", Linux/macOS 分支叫 "which"。
+_SYSTEM_SOURCES = ("system", "which")
+
+# 假系统浏览器路径: Windows 分支用 os.path.isfile 判定, Linux/macOS 用 shutil.which。
+_FAKE_WIN_SYSTEM = os.path.join("/fake/root", "chrome.exe")
+_FAKE_WHICH_SYSTEM = "/fake/bin/google-chrome"
+
+
+def _stub_system_browser(monkeypatch):
+    """让"系统浏览器"候选在任意平台都能被确定地构造出来。
+
+    _candidates() 的兜底分支按平台分叉: win32 走 os.path.isfile,
+    linux 走 shutil.which, macOS 先 os.path.exists(_MAC_APPS) 再 shutil.which。
+    这里把两条探测方式同时替换成只认本文件假路径的版本(_MAC_APPS 置空,
+    让 macOS 也走 shutil.which), 于是 ubuntu / windows / macos 的 CI 都能
+    拿到一个系统候选, source 可能是 "system", 也可能是 "which"。
+
+    这是防假绿的关键: 若 stub 不生效、系统候选没造出来, 顺序断言就无从比较,
+    测试必须直接变红(见 _assert_system_candidate), 而不是像旧版那样用
+    `if "system" in srcs:` 静默跳过。
+    """
+    monkeypatch.setattr(B, "_WIN_PAIRS",
+                        [("FakeChrome", "chrome", "chrome.exe")])
+    monkeypatch.setattr(B, "_WIN_ROOTS", ["/fake/root"])
+    monkeypatch.setattr(B, "_MAC_APPS", [])
+    monkeypatch.setattr(B.os.path, "isfile",
+                        lambda p: p == _FAKE_WIN_SYSTEM)
+    monkeypatch.setattr(B.shutil, "which",
+                        lambda exe: _FAKE_WHICH_SYSTEM)
+
+
+def _assert_system_candidate(srcs):
+    """返回命中的系统浏览器 source, 并硬性要求它必须存在。
+
+    旧版测试用 `if "system" in srcs:` 包住断言 —— 先把 os.path.isfile 恒设为
+    False, 系统候选永远构造不出来, 断言体整段不执行, 测试永远绿。这里改成
+    显式硬断言: 系统候选不存在就直接失败, 顺序断言才有意义。
+    """
+    hits = [s for s in srcs if s in _SYSTEM_SOURCES]
+    assert hits, (
+        "这里必须真的造出 system 候选, 否则顺序断言无效(假绿): "
+        f"实际候选来源 {srcs}")
+    return hits[0]
+
+
 def test_bundled_chromium_is_preferred_over_system_browser(monkeypatch):
     """包内自带内核必须排在系统浏览器之前 —— 这是"换机器也能跑"的前提。"""
+    monkeypatch.delenv("IS_BROWSER_PATH", raising=False)
+    monkeypatch.delenv("IS_CHROME_PATH", raising=False)
     monkeypatch.setattr(B, "_playwright_bundled",
                         lambda: "/pkg/.local-browsers/chromium-1243/chrome.exe")
     monkeypatch.setattr(B, "_playwright_browsers",
                         lambda: ["/cache/chromium-1210/chrome.exe"])
-    # 造一个假的系统浏览器候选
-    monkeypatch.setattr(B, "_WIN_PAIRS", [("FakeChrome", "chrome", "x/y/chrome.exe")])
-    monkeypatch.setattr(B, "_WIN_ROOTS", ["/fake/root"])
-    monkeypatch.setattr(os.path, "isfile", lambda p: False)
+    _stub_system_browser(monkeypatch)
 
     srcs = [s for s, _ in _sources()]
-    assert "playwright-bundled" in srcs
-    if "system" in srcs:                # 仅当系统浏览器确实存在时才比较顺序
-        assert srcs.index("playwright-bundled") < srcs.index("system"), (
-            f"包内内核必须优先于系统浏览器, 实际顺序: {srcs}")
+    assert "playwright-bundled" in srcs, f"缺少包内内核候选: {srcs}"
+    assert "ms-playwright-cache" in srcs, f"缺少缓存内核候选: {srcs}"
+    # 防假绿: 必须先用硬断言确认系统候选真的存在(不存在会在这里失败),
+    # 否则下面的 index 断言可能因比较对象缺失而失效。
+    system_src = _assert_system_candidate(srcs)
+    assert srcs.index("playwright-bundled") < srcs.index(system_src), (
+        f"包内内核必须优先于系统浏览器, 实际顺序: {srcs}")
+    # 原语义: bundled 同样优先于 ms-playwright 缓存
+    assert srcs.index("playwright-bundled") < srcs.index("ms-playwright-cache"), (
+        f"包内内核必须优先于缓存内核, 实际顺序: {srcs}")
 
 
 def test_explicit_path_wins_over_everything(monkeypatch, tmp_path):
@@ -60,12 +110,14 @@ def test_cache_chromium_ranks_above_system(monkeypatch):
     monkeypatch.setattr(B, "_playwright_bundled", lambda: None)
     monkeypatch.setattr(B, "_playwright_browsers",
                         lambda: ["/cache/chromium-1210/chrome.exe"])
-    monkeypatch.setattr(B, "_WIN_PAIRS", [("FakeChrome", "chrome", "x/y/chrome.exe")])
-    monkeypatch.setattr(B, "_WIN_ROOTS", ["/fake/root"])
-    monkeypatch.setattr(os.path, "isfile", lambda p: False)
+    _stub_system_browser(monkeypatch)
+
     srcs = [s for s, _ in _sources()]
-    if "system" in srcs:
-        assert srcs.index("ms-playwright-cache") < srcs.index("system")
+    assert "ms-playwright-cache" in srcs, f"缺少缓存内核候选: {srcs}"
+    # 防假绿: 硬断言系统候选必须存在, 否则下面的顺序断言没有比较对象。
+    system_src = _assert_system_candidate(srcs)
+    assert srcs.index("ms-playwright-cache") < srcs.index(system_src), (
+        f"缓存内核必须优先于系统浏览器, 实际顺序: {srcs}")
 
 
 def test_no_browser_anywhere_degrades_cleanly(monkeypatch):
@@ -113,8 +165,15 @@ def test_install_script_exists_and_documented():
 
 
 def test_install_script_is_valid_python():
-    import py_compile
-    py_compile.compile(str(_script()), doraise=True)
+    """语法校验用内存 compile, 不落 __pycache__。
+
+    原实现用 py_compile, 会往 scripts/__pycache__ 写 .pyc —— 在只读检出、
+    受限沙箱或缓存目录无写权限的环境里会误报 PermissionError, 与"脚本语法
+    是否正确"无关(实测本机就被旧权限残留卡了一个失败)。compile() 语义等价
+    (同样会抛 SyntaxError), 且零文件系统副作用。
+    """
+    p = _script()
+    compile(p.read_text(encoding="utf-8"), str(p), "exec")
 
 
 def test_render_extra_declares_playwright():

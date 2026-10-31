@@ -158,7 +158,12 @@ class BrowserRenderer:
         self._sem = threading.Semaphore(self.pool_size)
         self._initialized = False
         self._init_error: str = ""
+        # engine_name 是**归一化家族名**(chromium/chrome/msedge/...),
+        # engine_source 是候选来源(playwright-bundled/ms-playwright-cache/
+        # system/which/config/env)。两者不能混用: 曾把来源标识直接当引擎名,
+        # CI 上 /stats 与 RenderResult.engine 出现 "which" 这种值。
         self._engine_name = ""
+        self._engine_source = ""
 
         # 单工作线程: 独占 Playwright 实例, 所有渲染任务在此串行执行
         self._queue: "queue.Queue" = queue.Queue()
@@ -180,7 +185,7 @@ class BrowserRenderer:
         """
         if self.executable_path and os.path.exists(self.executable_path):
             # 已探测到内核, 保留最初的来源标识(避免二次探测把来源覆盖成 env)
-            return self.executable_path, (self._engine_name or "env")
+            return self.executable_path, (self._engine_source or "env")
         try:
             import playwright  # noqa: F401
         except ImportError:
@@ -213,7 +218,11 @@ class BrowserRenderer:
                                 "IS_CHROME_PATH 指向本机 Chrome/Edge")
             return False
         self.executable_path = exe
-        self._engine_name = src
+        self._engine_source = src
+        # 对外暴露的 engine 必须是归一化家族名, 与 BrowserPool.engine_name()
+        # 以及 README 的 /stats 契约一致; 来源标识只用于排障(info/detail)。
+        from .browser import _normalize_engine
+        self._engine_name = _normalize_engine(exe)
         return True
 
     @property
@@ -327,8 +336,9 @@ class BrowserRenderer:
                 self._init_error = f"浏览器启动失败: {type(e).__name__}: {e}"
                 raise RendererUnavailable(self._init_error)
             self._initialized = True
-            log.info("渲染器就绪: engine=%s exe=%s pool=%d",
-                     self._engine_name, self.executable_path, self.pool_size)
+            log.info("渲染器就绪: engine=%s src=%s exe=%s pool=%d",
+                     self._engine_name, self._engine_source,
+                     self.executable_path, self.pool_size)
 
     def _launch_browser(self) -> None:
         args = list(STEALTH_ARGS)
@@ -621,6 +631,8 @@ class BrowserRenderer:
         return {
             "available": self.available(),
             "engine": self.engine,
+            # 内核对来源(排障用; 不要和 engine 家族名混用)
+            "engine_source": self._engine_source,
             "executable": self.executable_path,
             "headless": self.headless,
             "pool_size": self.pool_size,

@@ -496,6 +496,11 @@ curl "http://127.0.0.1:8787/health"
 curl "http://127.0.0.1:8787/search?q=AMD+Zen5&top_k=5"
 ```
 
+容器内服务监听 `0.0.0.0`（`Dockerfile` 的 CMD 显式传 `--host 0.0.0.0`），
+docker-compose 的 `8787:8787` 端口映射才能从宿主机连通；若沿用默认的
+`127.0.0.1`，服务只在容器内回环上监听，上面两条 curl 会连接失败。
+`HEALTHCHECK` 仍在容器内经 `127.0.0.1` 自检，不受监听地址影响。
+
 渲染内核已装进镜像：`Dockerfile` 用 `PLAYWRIGHT_BROWSERS_PATH=0` 执行
 `playwright install --with-deps chromium`，内核落在 `site-packages` 内，
 容器自包含 —— 换宿主或换基础镜像都不会因缺浏览器而退化成纯 HTTP。
@@ -530,7 +535,8 @@ isearch "..." --freshness 1w --site github.com
 isearch "..." --fetch --max-content 4000   # 抓正文
 isearch --fetch-url https://example.com    # 单页抓取
 isearch --fetch-url https://example.com --render auto|http|render
-isearch --serve 8787                       # 起 HTTP 服务
+isearch --serve 8787                       # 起 HTTP 服务(默认只听 127.0.0.1)
+isearch --serve 8787 --host 0.0.0.0        # 指定监听地址(容器内必须 0.0.0.0)
 isearch --mcp                              # MCP stdio 服务
 isearch --stats                            # 运行状态
 ```

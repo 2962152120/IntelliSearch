@@ -4,7 +4,8 @@
     isearch "..." --top-k 5 --freshness 1w --json
     isearch "..." --context          # 输出可直接塞进 prompt 的引用文本
     isearch --fetch https://example.com
-    isearch --serve 8787             # 启动 HTTP 服务
+    isearch --serve 8787             # 启动 HTTP 服务(默认只听 127.0.0.1)
+    isearch --serve 8787 --host 0.0.0.0   # 容器/对外暴露时显式放开监听地址
 """
 from __future__ import annotations
 
@@ -51,6 +52,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--render", choices=["auto", "http", "render"], default="auto",
                    help="抓取模式: auto(默认, 需要时才渲染) / http(仅轻量) / render(强制渲染)")
     p.add_argument("--serve", metavar="PORT", type=int, help="启动 HTTP 服务")
+    p.add_argument("--host", default="127.0.0.1", metavar="ADDR",
+                   help="--serve 时的监听地址(默认 127.0.0.1; 容器内必须 0.0.0.0, "
+                        "否则端口映射从宿主机不可达)")
     p.add_argument("--mcp", action="store_true", help="以 MCP stdio 服务模式启动")
     p.add_argument("--stats", action="store_true", help="查看运行状态")
     p.add_argument("--purge-cache", action="store_true", help="清空缓存")
@@ -87,8 +91,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         return run_stdio(cfg)
 
     if args.serve:
+        # 显式把 --host 透传给 serve(): serve() 自身默认 127.0.0.1,
+        # 若 CLI 不透传, `--serve 8787` 在容器里只监听回环, 宿主端口映射不可达。
         from .server.http_api import serve
-        serve(port=args.serve, cfg=cfg)
+        serve(host=args.host, port=args.serve, cfg=cfg)
         return 0
 
     engine = SearchEngine(cfg)

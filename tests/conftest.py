@@ -1,8 +1,11 @@
 """测试公共夹具。"""
 from __future__ import annotations
 
+import http.server
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -14,6 +17,63 @@ if str(SRC) not in sys.path:
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 SERP_DIR = FIXTURES / "serp"
+
+# ---------------------------------------------------------------- 本机测试站点
+# 渲染/抓取类集成用例一律打本机 HTTP 服务, 不依赖 example.com / httpbin 等
+# 外部站点。2026-10-31 的 CI 集成失败就是外部 example.com 对 GitHub runner
+# 返回 Cloudflare 503 引起的 —— 渲染链路本身正常, 测试却红了。
+STATIC_PAGE_MARKER = "local-static-marker"
+SPA_JS_MARKER = "app-ready"
+
+STATIC_PAGE = (
+    "<!doctype html><html><head><title>Local Static</title></head><body>"
+    f"<h1>{STATIC_PAGE_MARKER}</h1>"
+    + "<p>这是一段有实际内容的正文段落，用来模拟普通静态文档页。</p>" * 20
+    + "</body></html>"
+)
+
+# 短小的 SPA 骨架页: 命中 id="app" 挂载点, 正文由 JS 注入
+SPA_PAGE = (
+    "<!doctype html><html><body>"
+    '<div id="app">loading</div>'
+    f"<script>document.getElementById('app').textContent='{SPA_JS_MARKER}';</script>"
+    "</body></html>"
+)
+
+
+class _LocalSiteHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        path = self.path.split("?")[0]
+        if path == "/slow":
+            # 确定性的慢响应: 渲染超时用例不必再赌 httpbin 的跨境网络
+            time.sleep(8)
+        body = (SPA_PAGE if path == "/spa" else STATIC_PAGE).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def log_message(self, *args):       # 静音访问日志
+        pass
+
+
+@pytest.fixture(scope="session")
+def local_site():
+    """本机 HTTP 服务, 返回 base URL; 会话结束时关闭。"""
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _LocalSiteHandler)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, name="is-test-site",
+                     daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
 
 
 def pytest_addoption(parser):
