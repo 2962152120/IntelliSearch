@@ -602,8 +602,8 @@ python -m pytest tests/ -q --run-integration        # 追加 29 项真实网络/
 
 | 运行方式 | 结果 |
 |---|---|
-| `pytest tests/`（离线，本机） | **294 passed / 29 skipped**，55s |
-| `pytest tests/ --run-integration`（GitHub Actions：真实网络 + **包内 Chromium**） | **319 passed / 1 skipped / 3 xpassed**，0 failed，166s |
+| `pytest tests/`（离线，本机） | **300 passed / 29 skipped**，72s |
+| `pytest tests/ --run-integration`（GitHub Actions：真实网络 + **包内 Chromium**） | **325 passed / 1 skipped / 3 xpassed**，0 failed，153s |
 
 > 跑测试时若看到"执行完了但没有 passed 统计行"，是环境的删除保护钩子拦了
 > `%TEMP%` 下的 pytest 临时目录清理；本项目已把 `--basetemp=.pytest-tmp`
@@ -625,6 +625,7 @@ python -m pytest tests/ -q --run-integration        # 追加 29 项真实网络/
 | `test_extractor.py` | 正文抽取（含真实文档页）、导航/页脚剔除、元信息、段落切分、截断、类型识别 |
 | `test_engine.py` | **状态收敛**：OK / PARTIAL / NO_RESULTS / ERROR / 限流；**`providers=` 只跑名单内的源、名单全不匹配收敛 ERROR**；缓存命中与不缓存失败结果；**`cache_key` 区分检索源集合**；输出字段齐备；压缩；会话记忆；**冲突检测与事实关键词不截断（price/product 不得塌缩成 pr 造成假冲突）**；**摘要预提取被输出层消费** |
 | `test_cache.py` | TTL 过期、命名空间隔离、**LRU 淘汰按 rowid 精确定位（同名 key 不跨 namespace 误删）**、损坏数据不抛异常 |
+| `test_http_client.py` | **流式下载**：媒体在读到响应头后零字节跳过（不再"完整下载后丢弃"）、`IS_FETCH_MAX_BYTES` 达到即停止下载（10KB 页只读 3KB）、异常路径关闭响应流 |
 | `test_http_api.py` | **HTTP 状态码映射**：`ok/partial/no_results`→200、`blocked`→403、`error`→502（JSON/context/markdown 三种格式口径一致）、`providers=` 解析与透传、POST 行为 |
 | `test_mcp_server.py` | **MCP 单次检索**：`format=context` 与 `json` 都只跑一次 `search`（回归：context 曾二次检索）、输出契约 |
 | `test_ratelimit.py` | 令牌桶、全局/会话/主机限流、黑名单、钓鱼站、付费墙标记 |
@@ -654,6 +655,7 @@ python -m pytest tests/ -q --run-integration        # 追加 29 项真实网络/
 - **付费墙真的降权**：安全层标记的 `_penalty` 被排序消费 —— 内容相同的免费结果排在付费墙结果之前（修复前标记写了但没人读）
 - **摘要真的被消费**：`summarize_results` 写入的 `extra["summary"]` 会被 `to_context` / `build_context` / `to_markdown` 优先使用，`with_content=True` 时仍返回完整正文（修复前只写不读，纯开销）
 - **相关性证据只看内容**：一条结果在标题/摘要里命中 ≥2 个实词才放行，URL 命中一律不凑数（标题 1 个 + URL 1 个不再放行）
+- **不白下媒体/超大页**：`IS_FETCH_MEDIA=false` 时图片/视频在读到响应头后直接跳过（响应体 0 字节）；`IS_FETCH_MAX_BYTES` 达到上限立即停止下载（测试里 10KB 文本页只读 3KB）
 
 ### 持续集成（GitHub Actions）
 
@@ -670,6 +672,8 @@ python -m pytest tests/ -q --run-integration        # 追加 29 项真实网络/
 一次全量（真实网络 + 真实 Chromium）为 `314 passed / 1 skipped / 3 xpassed`，0 failed。
 随后三条 P2（付费墙降权/事实关键词截断/相关性证据口径）修复后：离线
 `294 passed / 29 skipped`、Integration `319 passed / 1 skipped / 3 xpassed`，0 failed。
+再一轮收尾（HTTP 流式下载/媒体零字节跳过、compose Key 透传、文档漂移）：离线
+`300 passed / 29 skipped`、Integration `325 passed / 1 skipped / 3 xpassed`，0 failed。
 
 ---
 
