@@ -602,8 +602,8 @@ python -m pytest tests/ -q --run-integration        # 追加 29 项真实网络/
 
 | 运行方式 | 结果 |
 |---|---|
-| `pytest tests/`（离线，本机） | **289 passed / 29 skipped**，68s |
-| `pytest tests/ --run-integration`（GitHub Actions：真实网络 + **包内 Chromium**） | **314 passed / 1 skipped / 3 xpassed**，0 failed，186s |
+| `pytest tests/`（离线，本机） | **294 passed / 29 skipped**，55s |
+| `pytest tests/ --run-integration`（GitHub Actions：真实网络 + **包内 Chromium**） | **319 passed / 1 skipped / 3 xpassed**，0 failed，166s |
 
 > 跑测试时若看到"执行完了但没有 passed 统计行"，是环境的删除保护钩子拦了
 > `%TEMP%` 下的 pytest 临时目录清理；本项目已把 `--basetemp=.pytest-tmp`
@@ -668,6 +668,8 @@ python -m pytest tests/ -q --run-integration        # 追加 29 项真实网络/
 `UnicodeEncodeError` 崩溃（回归见 `tests/test_cli.py`）。
 2026-11-13 一轮 CI 三条腿均为 `289 passed / 29 skipped`；同日 Integration 手动触发
 一次全量（真实网络 + 真实 Chromium）为 `314 passed / 1 skipped / 3 xpassed`，0 failed。
+随后三条 P2（付费墙降权/事实关键词截断/相关性证据口径）修复后：离线
+`294 passed / 29 skipped`、Integration `319 passed / 1 skipped / 3 xpassed`，0 failed。
 
 ---
 
