@@ -223,6 +223,20 @@ class SearchResult:
             "credibility": round(self.credibility, 4),
         }
 
+    def display_text(self, with_content: bool = False) -> str:
+        """AI 输出用的正文段落。
+
+        优先级: 抓取到的 clean_text(仅显式要求正文时) > 预提取摘要
+        (``extra["summary"]``, engine 在 summarize=True 时写入) > snippet。
+
+        为什么要读 ``extra["summary"]``: summarize_results 是"摘要预提取"
+        这一步的全部产出; 如果输出层从不消费它, 预提取就是纯开销 ——
+        尤其是 snippet 为空、只有 clean_text 的结果, 上下文里会变成空正文。
+        """
+        if with_content and self.clean_text:
+            return self.clean_text
+        return self.extra.get("summary") or self.snippet or ""
+
 
 @dataclass
 class ProviderReport:
@@ -313,7 +327,7 @@ class SearchResponse:
                 meta_parts.append(r.publish_time[:10])
             meta_parts.append(r.source_type.value)
             meta = f"    (来源: {' | '.join(meta_parts)})"
-            body = r.clean_text if (with_content and r.clean_text) else r.snippet
+            body = r.display_text(with_content=with_content)
             body = re.sub(r"\s+\n", "\n", (body or "")).strip()
             block = f"{head}\n{meta}\n    {r.url}\n    {body}"
             if used + len(block) > max_chars:

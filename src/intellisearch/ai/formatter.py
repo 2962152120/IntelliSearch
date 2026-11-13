@@ -103,7 +103,7 @@ def to_markdown(resp: SearchResponse, with_content: bool = False,
                     else str(r.source_type))
         lines.append(f"{i}. **[{r.title}]({r.url})**  ")
         lines.append(f"   `{' · '.join(meta)}`")
-        body = r.clean_text if (with_content and r.clean_text) else r.snippet
+        body = r.display_text(with_content=with_content)
         if body:
             lines.append(f"   {truncate(body, max_body, '')}")
         lines.append("")
@@ -121,7 +121,7 @@ def build_context(results: Sequence[SearchResult], max_chars: int = 6000,
     lines: List[str] = []
     used = 0
     for i, r in enumerate(results, 1):
-        body = r.clean_text if (with_content and r.clean_text) else r.snippet
+        body = r.display_text(with_content=with_content)
         body = truncate(body or "", snippet_chars, "")
         meta = r.domain or ""
         if r.publish_time:

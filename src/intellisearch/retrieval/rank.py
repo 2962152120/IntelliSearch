@@ -143,6 +143,15 @@ def rank(results: List[SearchResult], terms: Sequence[str],
             w_f *= 2.0
         total = (cfg.w_relevance * rel + w_f * fresh +
                  cfg.w_credibility * cred + cfg.w_length * leng)
+        # 安全层的付费墙降权必须在这里真正生效: SafetyGuard 只会给结果打
+        # extra["_penalty"] 标记(如 0.85)。如果 rank 不读它, "标记 + 降权"
+        # 就只是空话 —— 付费墙内容照样按原分数排到最前, 甚至成为首条引用。
+        try:
+            penalty = float(r.extra.get("_penalty") or 1.0)
+        except (TypeError, ValueError):
+            penalty = 1.0
+        if penalty != 1.0:
+            total *= max(0.0, min(1.0, penalty))
         r.relevance_score = round(rel, 4)
         r.credibility = round(cred, 4)
         r.extra["_score"] = round(total / (cfg.w_relevance + w_f +

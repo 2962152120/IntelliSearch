@@ -199,6 +199,7 @@ rust async runtime -tokio → rust async runtime       （排除词生效）
 
 - **去重**：URL 归一化（去 www / 末尾斜杠 / fragment / 28 种跟踪参数）+ 标题相似度（0.88）二次判定；合并时补全缺失字段、保留更长摘要与更优标题
 - **排序**：`相关性(1.0) > 时效性(0.35) > 可信度(0.3) > 长度(0.08)`，时效性权重在有明确时间需求时翻倍；多源共识额外加成
+- **付费墙降权**：安全层识别到"登录后查看 / 会员专享 / subscribe to read"等特征的条目不丢弃（标题摘要仍可用），但会被标记 `paywall=True` 并在综合得分上乘 `0.85` 降权 —— 避免付费墙内容挤占引用位
 - **时效**：`exp(-days/180)` 衰减，无发布时间给中性分 0.45（不惩罚，多数网页本就没有）
 - **过滤**：站点白/黑名单、时间区间、广告与采集站、搜索引擎中间页（如 `ai.so.com/search/...`）
 - **数量上限**：`top_k` 截断（1~50）
@@ -238,8 +239,9 @@ rust async runtime -tokio → rust async runtime       （排除词生效）
 - 判定只用**实词** term：单字与疑问词（什么/怎么/为什么…）不算证据 ——
   否则搜"啥"字词典页也能命中（见 4.4.1）；
 - 一条结果要命中 **≥2 个**实词才保留。只有 URL 域名命中（`amd.com` 之于
-  "AMD Zen5 架构"）证据太弱，不算；标题/摘要命中且属权威站点
-  （官方文档/官网）时作为例外保留；
+  "AMD Zen5 架构"）证据太弱，不算；**URL 命中一律不计入证据**（不仅是域名 ——
+  标题里命中 1 个词、URL 里命中另 1 个词，也不能凑成"≥2"）。标题/摘要命中且属
+  权威站点（官方文档/官网）时作为例外保留；
 - 过滤后还剩至少一条 → 保留这个子集（避免把唯一正确结果连同垃圾一起扔掉）；
 - 过滤后**一条不剩** → 说明整个结果页被替换，整批丢弃，该源
   `ok=False`、`status="irrelevant"`，`error` 写明原因；
@@ -619,9 +621,9 @@ python -m pytest tests/ -q --run-integration        # 追加 29 项真实网络/
 | `test_query.py` | 分词、意图改写（含需求文档的 50/TOPS 示例）、布尔、时间、站点 |
 | `test_providers.py` | 四个源对真实样本页的解析、字段完整性、异常状态 |
 | `test_providers_fetcher.py` | **检索源 × 真实 SmartFetcher 联合路径**：params 必须透传到 HTTP 层、SERP 不得被启发式升级渲染、硬拦截仍救援且不重复、显式 `mode="render"` 不被内部记忆跳过 |
-| `test_rank_fusion.py` | URL/标题去重、字段合并、相关性/时效/可信度评分、站点与时间过滤、中间页剔除、top_k 截断 |
+| `test_rank_fusion.py` | URL/标题去重、字段合并、相关性/时效/可信度评分、**付费墙标记在排序中真正降权**、站点与时间过滤、中间页剔除、top_k 截断 |
 | `test_extractor.py` | 正文抽取（含真实文档页）、导航/页脚剔除、元信息、段落切分、截断、类型识别 |
-| `test_engine.py` | **状态收敛**：OK / PARTIAL / NO_RESULTS / ERROR / 限流；**`providers=` 只跑名单内的源、名单全不匹配收敛 ERROR**；缓存命中与不缓存失败结果；**`cache_key` 区分检索源集合**；输出字段齐备；压缩；会话记忆；冲突检测 |
+| `test_engine.py` | **状态收敛**：OK / PARTIAL / NO_RESULTS / ERROR / 限流；**`providers=` 只跑名单内的源、名单全不匹配收敛 ERROR**；缓存命中与不缓存失败结果；**`cache_key` 区分检索源集合**；输出字段齐备；压缩；会话记忆；**冲突检测与事实关键词不截断（price/product 不得塌缩成 pr 造成假冲突）**；**摘要预提取被输出层消费** |
 | `test_cache.py` | TTL 过期、命名空间隔离、**LRU 淘汰按 rowid 精确定位（同名 key 不跨 namespace 误删）**、损坏数据不抛异常 |
 | `test_http_api.py` | **HTTP 状态码映射**：`ok/partial/no_results`→200、`blocked`→403、`error`→502（JSON/context/markdown 三种格式口径一致）、`providers=` 解析与透传、POST 行为 |
 | `test_mcp_server.py` | **MCP 单次检索**：`format=context` 与 `json` 都只跑一次 `search`（回归：context 曾二次检索）、输出契约 |
@@ -631,7 +633,7 @@ python -m pytest tests/ -q --run-integration        # 追加 29 项真实网络/
 | `test_render.py` | 内核探测、引擎名、降级链判定、四种抓取模式、**`mode="render"` 在渲染禁用/内核缺失时显式 degraded**、**渲染返回 4xx/5xx 拦截页不采信（假成功回归）**、**`block_resources` 开关与 `lang`/locale 接线（本机站点请求留痕）**、真实 SPA 渲染、超时生效、并发渲染、干净降级 |
 | `test_browser_bundle.py` | **内置内核（11 项）**：包内内核优先级高于系统浏览器、显式路径最优先、缓存高于系统、完全无内核时降级为 `None` 不抛异常、候选去重、安装脚本存在且语法有效、`render` extra 已声明、**包目录扫描不依赖运行时环境变量**、`engine_detail` 在 `pool.info()` 与 `/render-info` 两处都带出内核绝对路径 |
 | `test_renderer.py` | 候选发现与启动参数形状、`needs_render` 参数化、**密度判据按全文统计（骨架页必须判渲染 / 正文充足不得误判）**、**`RenderRequest.block_resources/lang` 透传与 `_locale_for` 映射**、`_looks_incomplete` 密度判据、接口契约、真实渲染与自动升级、资源拦截、并发 |
-| `test_relevance_guard.py` | **反爬软封闸门**：整批无关结果被丢弃、多实词需命中≥2 个、仅域名命中不算、单实词查询不误杀、查询词为空不误杀、被判不可用的源如实上报 |
+| `test_relevance_guard.py` | **反爬软封闸门**：整批无关结果被丢弃、多实词需命中≥2 个、**URL 命中不能给内容命中凑数**、仅域名命中不算、单实词查询不误杀、查询词为空不误杀、被判不可用的源如实上报 |
 | `test_integration.py` | 真实中英文检索、多源管道完整性、软封时结果不外泄（`test_irrelevant_results_never_reach_caller`）、多源可用性（≥2 源，`xfail`）、站点/时效过滤、正文抓取、连续检索稳定性、无结果返回明确状态、超时生效 |
 
 关键验证结论：
@@ -649,6 +651,9 @@ python -m pytest tests/ -q --run-integration        # 追加 29 项真实网络/
 - **MCP 不重复检索**：`format=context` 与 `format=json` 都只跑一次检索（回归前 context 会把整轮检索跑两遍，网络与限流预算翻倍）
 - **渲染假成功已封**：渲染返回 4xx/5xx 拦截页时 `rendered=False`、`degraded=True` 且不采信该 HTML；`mode="render"` 在渲染被禁用/内核缺失时显式返回 `degraded=True` 与原因，不再静默退回 HTTP 冒充成功
 - **渲染开关真的生效**：`IS_RENDER_BLOCK_RES=0` / `RenderRequest(block_resources=False)` 时图片请求会真的到达站点（由本机站点请求留痕硬断言）；`lang` 会映射到浏览器 locale（zh→`zh-CN`、en→`en-US`）
+- **付费墙真的降权**：安全层标记的 `_penalty` 被排序消费 —— 内容相同的免费结果排在付费墙结果之前（修复前标记写了但没人读）
+- **摘要真的被消费**：`summarize_results` 写入的 `extra["summary"]` 会被 `to_context` / `build_context` / `to_markdown` 优先使用，`with_content=True` 时仍返回完整正文（修复前只写不读，纯开销）
+- **相关性证据只看内容**：一条结果在标题/摘要里命中 ≥2 个实词才放行，URL 命中一律不凑数（标题 1 个 + URL 1 个不再放行）
 
 ### 持续集成（GitHub Actions）
 

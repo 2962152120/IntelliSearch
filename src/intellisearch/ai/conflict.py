@@ -34,6 +34,26 @@ def _norm_key(k: str) -> str:
     return k.lower()
 
 
+def _full_key(text: str, m: re.Match) -> str:
+    """取完整关键词(修复惰性匹配造成的词尾截断)。
+
+    FACT_RE 的关键词是惰性的(为了让 "算力 50" / "算力: 50" 都能匹配), 代价是
+    ASCII 词会被 gap 吞掉尾部: "PRICE 2999 元" 抽成 "pr"、"NPU 算力 50 TOPS"
+    抽成 "np"。不同词因此塌缩成同一前缀(price/product 都变 "pr"), 在
+    detect_conflicts 里就会制造**假冲突**, 冲突消息里的关键词也成了残片。
+    这里把关键词两侧紧邻的 ASCII 字母/数字并回来(不跨空格/中文, 总长 <=12)。
+    """
+    start, end = m.start(1), m.end(1)
+    n = len(text)
+    while end < n and end - start < 12 and text[end].isascii() and \
+            text[end].isalnum():
+        end += 1
+    while start > 0 and end - start < 12 and text[start - 1].isascii() and \
+            text[start - 1].isalnum():
+        start -= 1
+    return _norm_key(text[start:end])
+
+
 def extract_facts(text: str, relevant_terms: Sequence[str] = ()) -> List[Tuple[str, float, str]]:
     """抽取 (关键词, 数值, 单位) 三元组。
 
@@ -41,10 +61,11 @@ def extract_facts(text: str, relevant_terms: Sequence[str] = ()) -> List[Tuple[s
     """
     if not text:
         return []
+    text = text[:4000]
     rel = {_norm_key(t) for t in relevant_terms if t}
     out: List[Tuple[str, float, str]] = []
-    for m in FACT_RE.finditer(text[:4000]):
-        key, val, unit = _norm_key(m.group(1)), float(m.group(2)), m.group(3).upper()
+    for m in FACT_RE.finditer(text):
+        key, val, unit = _full_key(text, m), float(m.group(2)), m.group(3).upper()
         if not key or key in GENERIC_KEYS:
             continue
         if rel:

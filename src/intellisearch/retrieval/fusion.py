@@ -67,20 +67,11 @@ def _strong_terms(terms: Sequence[str]) -> List[str]:
     return out
 
 
-def _hit_terms(r: SearchResult, terms: Sequence[str]) -> bool:
-    hay = f"{r.title} {r.snippet} {r.url}".lower()
-    return any(t and t.lower() in hay for t in terms)
-
-
-def _hit_count(r: SearchResult, terms: Sequence[str]) -> int:
-    """这条结果命中了**多少个**不同的实词(标题/摘要/URL 全文)。"""
-    hay = f"{r.title} {r.snippet} {r.url}".lower()
-    return sum(1 for t in terms if t and t.lower() in hay)
-
-
-# 匹配位置的可信度: 标题/摘要命中是内容相关, 仅 URL 命中往往只是域名
-# 恰好含查询词(实测 "AMD Zen5 架构" 返回 amd.com 官网/shop.amd.com, 只是
-# 域名里有 "amd"), 这种命中不能算"相关"。
+# 相关性证据只认标题/摘要: 仅 URL 命中往往只是域名恰好含查询词
+# (实测 "AMD Zen5 架构" 返回 amd.com 官网/shop.amd.com, 只是域名里有 "amd"),
+# 这种命中不能算"相关"。曾经这里还有一条"URL 也算一个命中"的老口径
+# (`content >= 2 or total >= 2`), 于是"标题命中 1 个词 + 域名命中另 1 个词"
+# 就能通过闸门 —— 与"仅域名不算"的承诺自相矛盾, 已统一为只看内容命中。
 def _hits_content(r: SearchResult, terms: Sequence[str]) -> int:
     hay = f"{r.title} {r.snippet}".lower()
     return sum(1 for t in terms if t and t.lower() in hay)
@@ -97,9 +88,10 @@ def _drop_irrelevant(items: List[SearchResult],
     链接会被当作检索证据直接写进答案。
 
     判定分两层:
-    1. 逐条过滤: 一条结果要命中 >=2 个实词才保留; 只命中 1 个的通常是
-       泛化首页/词条页(实测 "AMD Zen5 架构" 返回 amd.com 官网、shop.amd.com,
-       只是域名里有 amd)。例外: 标题/摘要命中且域名权威(官方文档站)时保留。
+    1. 逐条过滤: 一条结果要在标题/摘要里命中 >=2 个实词才保留; 只命中 1 个的
+       通常是泛化首页/词条页(实测 "AMD Zen5 架构" 返回 amd.com 官网、
+       shop.amd.com, 只是域名里有 amd)。例外: 命中 1 个但域名权威(官方
+       文档站)时保留。**URL 命中不计入证据**(与上面的口径一致)。
     2. 整批判定: 全部被过滤掉才说明整个结果页被替换, 此时整批丢弃。
        只要还剩一条真结果, 就保留过滤后的子集 —— 避免把唯一的正确结果
        连同垃圾一起扔掉。
@@ -116,9 +108,8 @@ def _drop_irrelevant(items: List[SearchResult],
     kept = []
     for r in items:
         content = _hits_content(r, strong)
-        total = _hit_count(r, strong)
-        if content >= 2 or total >= 2:
-            kept.append(r)          # 命中 >=2 个实词: 明确相关
+        if content >= 2:
+            kept.append(r)          # 标题/摘要命中 >=2 个实词: 明确相关
         elif content >= 1 and not multi:
             kept.append(r)          # 单实词查询: 标题/摘要命中即可
         elif content >= 1 and _is_authoritative(r):

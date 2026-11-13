@@ -54,6 +54,19 @@ def test_url_only_match_is_insufficient_for_multi_term_query():
     assert kept == [], "仅 URL 命中 1 个词, 证据不足"
 
 
+def test_url_cannot_add_a_second_hit():
+    """URL 命中不得给内容命中"凑数"。
+
+    回归: 判定曾写成 `content >= 2 or total >= 2`(total 含 URL), 于是一条
+    "标题只命中 1 个词 + 域名/路径命中另 1 个词"的结果也能通过多词闸门,
+    与 README "仅域名命中不算相关"的承诺自相矛盾。
+    """
+    items = [mk("Zen5 简介", "https://x.com/架构")]
+    kept, why = _drop_irrelevant(items, ["zen5", "架构"])
+    assert kept == [], "标题 1 命中 + URL 1 命中不应算 >=2 个实词证据"
+    assert "无关" in why
+
+
 def test_genuine_multi_term_results_survive():
     items = [mk("AMD Zen5 架构解析", "https://amd.com/zen5", "Zen5 微架构"),
              mk("Zen5 架构对比 Zen4", "https://x.com/1", "AMD Zen5")]

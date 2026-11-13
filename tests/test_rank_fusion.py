@@ -87,6 +87,24 @@ def test_rank_orders_by_score():
     assert ranked[0].extra["_score"] >= ranked[-1].extra["_score"]
 
 
+def test_paywall_mark_actually_lowers_rank():
+    """安全层打的付费墙标记必须在排序里真正降权(README: 标记 + 降权)。
+
+    回归: SafetyGuard 只写 extra["_penalty"] = 0.85, 而 rank() 从不读它 ——
+    付费墙内容照样按原分排序, "降权"只是文档里的空话。
+    """
+    from intellisearch.safety.blacklist import SafetyGuard
+
+    paywalled = mk("内容 A", "https://a.com/pay", snippet="该内容需要登录后查看")
+    normal = mk("内容 A", "https://a.com/free", snippet="该内容免费公开阅读")
+    kept, _ = SafetyGuard(skip_paywall=True).filter_results([paywalled, normal])
+    assert paywalled.extra["paywall"] is True
+    assert paywalled.extra["_penalty"] < 1.0
+    ranked = rank(kept, ["内容"], "内容")
+    assert ranked[0] is normal, "付费墙结果没有被降权, 仍排在免费结果前面"
+    assert ranked[0].extra["_score"] > ranked[1].extra["_score"]
+
+
 # ---------------------------------------------------------------- 过滤
 def test_filter_by_site():
     rs = [mk("A", "https://github.com/x"), mk("B", "https://other.com/y")]

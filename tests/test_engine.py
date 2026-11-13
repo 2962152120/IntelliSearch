@@ -204,6 +204,50 @@ def test_top_k_is_enforced():
     assert len(r.results) == 3
 
 
+# ---------------------------------------------------------------- 事实抽取/冲突
+def test_fact_key_keeps_full_ascii_word():
+    """关键词不得被惰性匹配截断成前缀(回归: "NPU" 曾抽成 "np")。
+
+    FACT_RE 的关键词部分是惰性的, gap 会把词尾字母吃掉: "NPU 算力 50 TOPS"
+    抽成 ("np", 50, "TOPS")。截断不只是显示难看 —— 不同词塌缩成同一前缀后
+    会在 detect_conflicts 里制造假冲突。
+    """
+    facts = extract_facts("NPU 算力 50 TOPS", ["NPU", "算力"])
+    keys = {k for k, _, _ in facts}
+    assert facts, "应能抽出 NPU 算力事实"
+    assert "np" not in keys, f"关键词被截断: {facts}"
+    assert "npu" in keys, f"关键词应保留完整 ASCII 词: {facts}"
+
+
+def test_truncated_keys_no_longer_cause_false_conflict():
+    """不同英文关键词被截断成同一前缀("price"/"product" -> "pr")会假冲突。"""
+    rs = [mk("A", "https://a.com/1", "Price 2999 元"),
+          mk("B", "https://b.com/2", "Product 1999 元")]
+    conflicts = detect_conflicts(rs, ["price", "product"])
+    assert conflicts == [], f"不同关键词不应被判成同一事实的冲突: {conflicts}"
+
+
+# ---------------------------------------------------------------- 摘要/正文输出
+def test_summary_is_consumed_by_ai_context():
+    """summarize_results 写的 extra["summary"] 必须被输出层消费。
+
+    回归: 摘要预提取只写不读 —— snippet 为空、只有 clean_text 的结果,
+    上下文里的正文是空的, 预提取纯属白算。
+    """
+    from intellisearch.ai.formatter import summarize_results
+    from intellisearch.models import SearchResponse
+
+    r = mk("标题", "https://a.com/1", "")
+    r.clean_text = "这是一段很长的正文内容，用来测试摘要预提取是否被真正消费。" * 10
+    summarize_results([r], max_chars=50)
+    assert r.extra.get("summary"), "应生成预提取摘要"
+    assert r.display_text() == r.extra["summary"], "无正文模式应使用摘要"
+    assert r.display_text(with_content=True) == r.clean_text
+
+    resp = SearchResponse(query="q", results=[r])
+    assert r.extra["summary"][:10] in resp.to_context()
+
+
 # ---------------------------------------------------------------- 检索源限定
 def test_providers_option_filters_sources():
     """providers=[s2] 只调用 s2, 且返回结果来自 s2。"""
