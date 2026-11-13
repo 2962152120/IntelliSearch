@@ -88,7 +88,13 @@ class QueryOptions:
             self.top_k = 50
 
     def cache_key(self, raw_query: str) -> str:
-        """生成缓存键。不含 session_id / timeout 等不影响结果语义的字段。"""
+        """生成缓存键。不含 session_id / timeout 等不影响结果语义的字段。
+
+        必须包含 providers: 同一 query 指定不同检索源时结果是**不同**的,
+        不区分就会命中同一份缓存, 使 providers 过滤形同虚设(命中的那批
+        结果来自上一次的源集合)。None 与 [] 语义相同(都表示不过滤), 键相等;
+        顺序不影响语义, 故先排序再拼接。
+        """
         payload = "|".join(
             [
                 raw_query.strip().lower(),
@@ -101,6 +107,7 @@ class QueryOptions:
                 self.lang,
                 "1" if self.fetch_content else "0",
                 str(self.max_content_chars),
+                ",".join(sorted(self.providers or [])),
             ]
         )
         return hashlib.sha1(payload.encode("utf-8")).hexdigest()

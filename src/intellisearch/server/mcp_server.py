@@ -189,12 +189,17 @@ class MCPServer:
             max_content_chars=int(args.get("max_chars", 6000) or 6000) // 2,
         )
         resp = self.engine.search(query, opts)
+        max_chars = int(args.get("max_chars", 6000) or 6000)
         if str(args.get("format", "json")) == "context":
-            return self.engine.search_context(
-                query, opts, max_chars=int(args.get("max_chars", 6000) or 6000))
+            # 只检索一次: 直接用已拿到的 resp 渲染上下文。
+            # 曾错误地在这里再调 self.engine.search_context(...), 而它内部
+            # 又 search 一遍 —— 缓存关闭/未命中时整轮检索跑两次, 网络与
+            # 限流预算翻倍。渲染口径与 HTTP API 的 format=context 一致。
+            return resp.to_context(max_chars=max_chars,
+                                   with_content=opts.fetch_content)
         payload = resp.to_dict()
         from ..ai.formatter import compress
-        payload = compress(payload, int(args.get("max_chars", 6000) or 6000))
+        payload = compress(payload, max_chars)
         return json.dumps(payload, ensure_ascii=False, indent=2)
 
     def _tool_fetch(self, args: Dict[str, Any]) -> str:

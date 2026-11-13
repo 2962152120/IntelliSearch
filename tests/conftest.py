@@ -40,16 +40,56 @@ SPA_PAGE = (
     "</body></html>"
 )
 
+# 本机站点收到的请求路径(含图片等子资源)。集成用例据此硬断言"资源真的被拦/
+# 真的被加载", 比只看渲染器自报的 blocked_requests 更难造假。
+# 全局列表会跨用例累积, 用到它的用例应先 clear() 再断言。
+LOCAL_SITE_HITS: list = []
+
+# /pics 引用的 1x1 透明 PNG(合法图片, Chromium 会真的发出请求)
+PNG_1X1 = (
+    b"\x89PNG\r\n\x1a\n"
+    b"\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00"
+    b"\x1f\x15\xc4\x89"
+    b"\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4"
+    b"\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+
+# 带两张图片的页面: 用于验证 block_resources 开关是否真的接线
+PICS_PAGE = (
+    "<!doctype html><html><body><h1>pics</h1>"
+    '<img src="/img.png?n=1"><img src="/img.png?n=2">'
+    "</body></html>"
+)
+
+# 渲染执行 JS 后才把 navigator.language 写进正文 —— 验证 lang/locale 真的生效
+LANG_PAGE = (
+    "<!doctype html><html><body><div>pending</div>"
+    "<script>document.body.textContent=navigator.language;</script>"
+    "</body></html>"
+)
+
 
 class _LocalSiteHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?")[0]
+        LOCAL_SITE_HITS.append(path)        # 每个请求都留痕(含子资源)
         if path == "/slow":
             # 确定性的慢响应: 渲染超时用例不必再赌 httpbin 的跨境网络
             time.sleep(8)
-        body = (SPA_PAGE if path == "/spa" else STATIC_PAGE).encode("utf-8")
+        content_type = "text/html; charset=utf-8"
+        if path == "/spa":
+            body = SPA_PAGE.encode("utf-8")
+        elif path == "/pics":
+            body = PICS_PAGE.encode("utf-8")
+        elif path == "/lang":
+            body = LANG_PAGE.encode("utf-8")
+        elif path == "/img.png":
+            body = PNG_1X1
+            content_type = "image/png"
+        else:
+            body = STATIC_PAGE.encode("utf-8")
         self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         try:

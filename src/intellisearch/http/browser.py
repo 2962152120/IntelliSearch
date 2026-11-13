@@ -618,6 +618,10 @@ class BrowserPool:
                 timeout=req.timeout or self.cfg.render_timeout,
                 headers=req.headers or None,
                 cookies=req.cookies or None,
+                # 请求级开关必须透传到渲染器: 漏传会让
+                # IS_RENDER_BLOCK_RES=0 与 req.lang 双双失效(曾经如此)。
+                block_resources=req.block_resources,
+                lang=req.lang,
             )
         except BrowserUnavailable:
             raise

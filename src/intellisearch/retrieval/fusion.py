@@ -142,6 +142,21 @@ def parallel_search(providers: Sequence[SearchProvider], parsed: ParsedQuery,
         return [], [ProviderReport(name="*", ok=False, status="skipped",
                                    error="没有可用的检索源")]
 
+    # 调用方指定检索源时, 只跑名单内的源(名字精确匹配)。
+    # 没有这一步, QueryOptions.providers 只是个传不下去的装饰品: HTTP 的
+    # ?providers=sogou 会被解析出来, 然后照旧把所有源都打一遍。
+    # None / 空表示不限制。
+    requested = [n for n in (options.providers or []) if n]
+    if requested:
+        usable = [p for p in usable if p.name in requested]
+        if not usable:
+            # 全部不匹配 -> 单个失败报告, 引擎据此收敛为 Status.ERROR。
+            # 不能静默回退成"跑所有源": 调用方明确限定源时, 拿别的源的结果
+            # 冒充, 与"源不可用"相比是更糟的错。
+            return [], [ProviderReport(
+                name="*", ok=False, status="error",
+                error=f"指定的检索源不可用: {', '.join(requested)}")]
+
     results: List[SearchResult] = []
     reports: List[ProviderReport] = []
 

@@ -130,9 +130,17 @@ class SmartFetcher:
         t_all = time.time()
         timeout = timeout or self.cfg.timeout
         retries = self.cfg.retries if retries is None else retries
-        if need_render is None:
-            need_render = (self.cfg.render_enabled and mode != "http")
         force_render = (mode == "render")
+        if need_render is None:
+            # mode="render" 是调用方的**硬承诺**: 即使渲染被禁用也必须进 Tier2
+            # 分支, 由 Tier2 显式返回 degraded 原因。曾经这里跟着
+            # render_enabled 走, 渲染关掉时 mode="render" 会静默退回 HTTP,
+            # degraded=False 且 fetch_mode="http" —— 调用方以为渲染成功了。
+            need_render = force_render or (self.cfg.render_enabled
+                                           and mode != "http")
+        else:
+            # 显式 need_render=False 也不能压过 mode="render" 的承诺
+            need_render = bool(need_render) or force_render
         # 强制渲染: 即使 HTTP 拿到了内容, 也仍然走一遍浏览器以执行 JS
         must_render = force_render
         out = FetchOutcome(text="", url=url)
@@ -180,8 +188,8 @@ class SmartFetcher:
         # 即没能按理想路径拿到内容。它描述的是**过程**, 不代表内容不可用 ——
         # 内容是否可用看 ok/text。两者不能混为一谈, 否则调用方无法区分。
         if not need_render:
-            # 明确只要 HTTP(mode=http 或渲染被禁用): 这就是预期路径,
-            # 成功拿到完整内容不算降级。
+            # 明确只要 HTTP(mode=http, 或调用方显式 need_render=False):
+            # 这就是预期路径, 成功拿到完整内容不算降级。
             out.fetch_mode = out.tier = ("http" if out.text else "none")
             out.degraded = (not out.text) or (
                 bool(out.text) and self._looks_incomplete(out.text, url,
@@ -212,11 +220,23 @@ class SmartFetcher:
             out.elapsed_ms = int((time.time() - t_all) * 1000)
             return out
         if pool is None or not pool.available():
-            out.attempts.append("render:unavailable")
+            # 渲染不可用有两种原因, 必须分开报 —— 否则 mode="render" 的调用方
+            # 分不清"配置关了渲染"和"这台机器没内核", 无法自助修复。
+            if not self.cfg.render_enabled:
+                out.attempts.append("render:disabled")
+                if must_render:
+                    why = ("渲染能力已禁用(IS_RENDER=0)，无法满足 mode=render；"
+                           "已降级为轻量抓取")
+                else:
+                    why = "渲染能力已禁用(IS_RENDER=0)，已降级为轻量抓取"
+            else:
+                out.attempts.append("render:unavailable")
+                why = "渲染内核不可用, 已降级为轻量抓取"
             out.fetch_mode = out.tier = ("http" if out.text else "none")
             # 渲染内核不可用本身就是一次降级(没走理想路径)
             out.degraded = True
-            out.reason = out.reason or "渲染内核不可用, 已降级为轻量抓取"
+            # 保留 Tier1 已记录的失败原因, 不能让它把"为什么没渲染"盖掉
+            out.reason = f"{out.reason}；{why}" if out.reason else why
             self.stats["degraded"] += 1
             if not out.text:
                 self.stats["failed"] += 1
@@ -235,7 +255,13 @@ class SmartFetcher:
         try:
             r = pool.render(req)
             out.attempts.append(f"render:{r.status}")
-            if r.html:
+            # 渲染成功的判据必须同时看状态码: 403/503 的拦截页同样有 html,
+            # 只看 html 非空会把它当成功(degraded=False、tier=render), 上层拿到
+            # 一屏"拒绝访问"却以为渲染救回来了 —— 而且与 _note_render 把
+            # status>=400 记为 dead host 的判定自相矛盾。status==0 保持旧语义,
+            # 视为成功并把对外的 status 落成 200。
+            r_status = r.status or 0
+            if r.html and r_status < 400:
                 out.text = r.html
                 out.url = r.final_url or url
                 out.status = r.status or 200
@@ -249,7 +275,12 @@ class SmartFetcher:
                 self._note_render(url, r)
                 out.elapsed_ms = int((time.time() - t_all) * 1000)
                 return out
-            out.reason = "渲染返回空内容"
+            if r.html:
+                # 4xx/5xx 拦截页: 不采信这段 html(绝不覆盖 Tier1 已拿到的文本),
+                # 按渲染失败处理, 交给 Tier3 显式降级。
+                out.reason = f"渲染返回 HTTP {r_status} 拦截页，未采信"
+            else:
+                out.reason = "渲染返回空内容"
             self._note_render(url, r)
         except RenderError as e:
             out.attempts.append(f"render_err:{e.code}")

@@ -25,7 +25,7 @@ from urllib.parse import parse_qs, urlparse
 from ..ai.formatter import compress, to_markdown
 from ..config import Config, DEFAULT_CONFIG
 from ..engine import SearchEngine
-from ..models import Freshness, QueryOptions
+from ..models import Freshness, QueryOptions, Status
 
 log = logging.getLogger("intellisearch.http_api")
 
@@ -74,6 +74,21 @@ def _opts_from(params: Dict[str, Any]) -> QueryOptions:
         providers=([s.strip() for s in str(g("providers", "")).split(",")
                     if s.strip()] or None),
     )
+
+
+def _search_http_status(status: Status) -> int:
+    """把检索状态映射为 HTTP 状态码。
+
+    NO_RESULTS 是"源都正常响应、但确实没有匹配结果"的正常业务状态, 必须
+    返回 200; 用 SearchResponse.ok 判码会把它当 502, 让调用方(尤其是只看
+    状态码的网关/客户端)误以为服务故障并重试。真正的故障/部分成功与
+    "没结果"的区分由响应体的 status / ok 字段承担。
+    """
+    if status in (Status.OK, Status.PARTIAL, Status.NO_RESULTS):
+        return 200
+    if status == Status.BLOCKED:
+        return 403
+    return 502
 
 
 def make_handler(holder: _EngineHolder):
@@ -174,17 +189,22 @@ def make_handler(holder: _EngineHolder):
             if isinstance(fmt, list):
                 fmt = fmt[0] if fmt else "json"
             resp = holder.get().search(query, opts)
+            # 三种输出格式共用同一套状态码映射: HTTP 码表达"请求是否被正常处理",
+            # 业务状态由 body / 文本里的 status 字段表达。否则会出现
+            # JSON 分支 error→502、context 分支 error→200 的口径分裂。
+            http_code = _search_http_status(resp.status)
             if fmt == "context":
                 max_chars = int(params.get("max_chars", 6000) if not isinstance(
                     params.get("max_chars"), list) else
                     (params.get("max_chars") or [6000])[0])
-                self._send(200, resp.to_context(
+                self._send(http_code, resp.to_context(
                     max_chars=max_chars,
                     with_content=opts.fetch_content).encode("utf-8"),
                     "text/plain")
                 return
             if fmt == "markdown":
-                self._send(200, to_markdown(resp).encode("utf-8"), "text/markdown")
+                self._send(http_code, to_markdown(resp).encode("utf-8"),
+                           "text/markdown")
                 return
             payload = resp.to_dict()
             max_chars = params.get("max_chars")
@@ -192,7 +212,7 @@ def make_handler(holder: _EngineHolder):
                 max_chars = max_chars[0] if max_chars else None
             if max_chars:
                 payload = compress(payload, int(max_chars))
-            self._json(200 if resp.ok else 502, payload)
+            self._json(http_code, payload)
 
     return Handler
 

@@ -202,3 +202,44 @@ def test_top_k_is_enforced():
     e = make_engine([StaticProvider("s1", many)])
     r = e.search("T", QueryOptions(top_k=3))
     assert len(r.results) == 3
+
+
+# ---------------------------------------------------------------- 检索源限定
+def test_providers_option_filters_sources():
+    """providers=[s2] 只调用 s2, 且返回结果来自 s2。"""
+    p1 = StaticProvider("s1", [mk("Python 教程", "https://a.com/1", source="s1")])
+    p2 = StaticProvider("s2", [mk("Python 教程", "https://b.com/2", source="s2")])
+    e = make_engine([p1, p2])
+    r = e.search("Python 教程", QueryOptions(providers=["s2"]))
+    assert r.status == Status.OK, r.message
+    assert p1.calls == [], "未在 providers 名单内的源不应被调用"
+    assert p2.calls, "providers 名单内的源必须被调用"
+    assert r.results and all(x.source == "s2" for x in r.results)
+
+
+def test_unknown_provider_converges_to_error():
+    """providers 全部不匹配 -> ERROR, 报告说明指定源不可用。"""
+    p1 = StaticProvider("s1", [mk("Python 教程", "https://a.com/1")])
+    e = make_engine([p1])
+    r = e.search("Python 教程", QueryOptions(providers=["不存在的源"]))
+    assert r.status == Status.ERROR
+    assert r.results == []
+    assert len(r.providers) == 1
+    rep = r.providers[0]
+    assert rep.name == "*" and rep.ok is False and rep.status == "error"
+    assert "指定的检索源不可用" in rep.error
+    assert "不存在的源" in rep.error
+    assert "指定的检索源不可用" in r.message
+    assert p1.calls == [], "源全部被过滤掉时不应再调用任何源"
+
+
+def test_cache_key_distinguishes_providers():
+    """providers 参与缓存键, 否则不同源集合会命中同一份缓存。"""
+    assert (QueryOptions(providers=["s1"]).cache_key("q") !=
+            QueryOptions(providers=["s2"]).cache_key("q"))
+    # 顺序不影响语义: 排序后拼接
+    assert (QueryOptions(providers=["s1", "s2"]).cache_key("q") ==
+            QueryOptions(providers=["s2", "s1"]).cache_key("q"))
+    # None 与 [] 都表示"不过滤", 语义相同 -> 同一个键
+    assert (QueryOptions(providers=None).cache_key("q") ==
+            QueryOptions(providers=[]).cache_key("q"))

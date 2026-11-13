@@ -215,6 +215,73 @@ def test_pool_info_shape():
 
 
 # ==================================================================
+# 渲染参数接线(离线, 不启动浏览器)
+# ==================================================================
+class _RecordingRenderer:
+    """渲染器替身: 记录 render() 收到的参数, 不启动任何浏览器。"""
+
+    def __init__(self):
+        self.calls = []
+
+    def render(self, url, **kwargs):
+        from intellisearch.http.renderer import RenderedPage
+        self.calls.append((url, kwargs))
+        return RenderedPage(
+            url=url, status_code=200,
+            html="<html><body>rendered</body></html>",
+            title="t", text="rendered", engine="chromium", elapsed_ms=1,
+            blocked_resources=0, js_errors=[], selector_found=None,
+            scrolled=False,
+        )
+
+    def close(self, timeout=None):
+        pass
+
+
+def test_pool_passes_block_resources_and_lang_to_renderer():
+    """RenderRequest.block_resources / lang 必须透传到 renderer.render()。
+
+    回归: BrowserPool.render_sync 曾经只传 url/超时/headers/cookies,
+    于是 IS_RENDER_BLOCK_RES=0 完全无效(恒按 block_media=True 拦截),
+    req.lang 也完全无效(恒 zh-CN)。修复前 fake 收不到这两个关键字参数,
+    本用例必然变红。
+    """
+    p = BrowserPool()
+    fake = _RecordingRenderer()
+    p._renderer = fake                      # 注入替身, 绕开内核发现
+    try:
+        result = p.render_sync(RenderRequest(
+            url="http://127.0.0.1/x", lang="en", block_resources=False))
+    finally:
+        p.close(timeout=5)
+    assert result.status == 200 and result.html
+    assert fake.calls, "渲染器未被调用"
+    _, kwargs = fake.calls[0]
+    assert kwargs.get("block_resources") is False, \
+        f"block_resources 未透传给渲染器: {kwargs}"
+    assert kwargs.get("lang") == "en", f"lang 未透传给渲染器: {kwargs}"
+
+
+@pytest.mark.parametrize("lang,expected", [
+    ("zh", "zh-CN"),          # 短码映射成区域化 locale
+    ("en", "en-US"),
+    ("zh-TW", "zh-TW"),       # 已是 xx-YY 形态: 原样使用
+    ("", "zh-CN"),            # 空 lang 保持历史默认
+])
+def test_locale_for_maps_lang(lang, expected):
+    from intellisearch.http.renderer import _locale_for
+    assert _locale_for(lang) == expected
+
+
+def test_locale_for_prefers_accept_language_header():
+    """headers 里的 Accept-Language 优先于 lang。"""
+    from intellisearch.http.renderer import _locale_for
+    assert _locale_for("zh", {"Accept-Language": "en-US"}) == "en-US"
+    # 头名大小写不敏感; 带 q 值的列表必须只取第一段(否则 locale 非法)
+    assert _locale_for("", {"accept-language": "de-DE,de;q=0.8"}) == "de-DE"
+
+
+# ==================================================================
 # 真实渲染(需网络与内核)
 # ==================================================================
 @pytest.mark.integration

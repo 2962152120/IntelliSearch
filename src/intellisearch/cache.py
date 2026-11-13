@@ -130,10 +130,13 @@ class Cache:
             cur = self._conn.execute("SELECT COUNT(*) FROM cache")
             n = cur.fetchone()[0]
             if n > self.max_entries:
-                # 按 LRU 近似: hits 最少 + 创建最早
+                # 按 LRU 近似: hits 最少 + 创建最早。
+                # 必须用 rowid 精确定位: 主键是 (namespace, key), 同一个 key
+                # 在 search / page 两个 namespace 各有一行, 按 key 删会连带
+                # 删掉另一个 namespace 的同名行(而且可能删多行)。
                 self._conn.execute(
-                    "DELETE FROM cache WHERE key IN ("
-                    "  SELECT key FROM cache ORDER BY hits ASC, created_at ASC"
+                    "DELETE FROM cache WHERE rowid IN ("
+                    "  SELECT rowid FROM cache ORDER BY hits ASC, created_at ASC"
                     "  LIMIT ?)", (n - self.max_entries,))
             self._conn.commit()
         except Exception:              # noqa: BLE001

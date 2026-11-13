@@ -75,3 +75,20 @@ def test_in_memory_cache_works():
     c.set("k", [1, 2, 3], "search")
     assert c.get("k", "search") == [1, 2, 3]
     c.close()
+
+
+def test_eviction_does_not_delete_same_key_in_other_namespace(tmp_path):
+    """LRU 淘汰只能删被选中的那一行, 不能连带删除其它 namespace 的同名 key。
+
+    search / page 两个 namespace 都使用同形态的 key(哈希串), 旧实现按
+    `WHERE key IN (SELECT key ...)` 删除, 同名 key 的所有行一起被删 ——
+    这里 page 行被淘汰后, search 行也会被误删。必须按 rowid 精确删除。
+    """
+    c = Cache(path=str(tmp_path / "c.db"), ttl=600, max_entries=1, enabled=True)
+    c.set("k", "page-value", "page")
+    time.sleep(0.01)                      # 保证 created_at 有先后, 淘汰 page 行
+    c.set("k", "search-value", "search")  # 触发淘汰 1 行
+    assert c.get("k", "search") == "search-value", "search namespace 的行被误删了"
+    assert c.get("k", "page") is None
+    assert c.info()["entries"] == 1
+    c.close()

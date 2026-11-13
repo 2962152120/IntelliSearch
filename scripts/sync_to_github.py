@@ -34,10 +34,15 @@ SKIP_DIRS = {".git", ".workbuddy", ".claude", ".cursor", ".vscode", ".idea",
              "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
              "node_modules", "dist", "build",
              # 虚拟环境: 绝不入库
-             ".venv", "venv", "env",
-             # pytest --basetemp / 本地临时产物(见 pyproject 注释)
-             ".pytest-tmp", ".pytest-run-tmp", ".tmp"}
+             ".venv", "venv", "env"}
+# pytest --basetemp / 本地临时产物一律按**前缀**跳过: 实际目录名常带后缀
+# (如 .pytest-tmp-lead / .pytest-tmp-a7), 精确集合匹配会漏掉它们。
+SKIP_DIR_PREFIXES = (".pytest-tmp", ".pytest-run-tmp", ".tmp")
 SKIP_SUFFIX = {".pyc", ".pyo", ".sqlite3", ".sqlite", ".log"}
+
+
+def _skip_dir_segment(seg: str) -> bool:
+    return seg in SKIP_DIRS or seg.startswith(SKIP_DIR_PREFIXES)
 
 
 def gh(args, payload=None):
@@ -67,7 +72,7 @@ def local_files():
         if not p.is_file():
             continue
         rel_parts = p.relative_to(ROOT).parts
-        if any(seg in SKIP_DIRS for seg in rel_parts):
+        if any(_skip_dir_segment(seg) for seg in rel_parts):
             continue
         if p.suffix in SKIP_SUFFIX:
             continue

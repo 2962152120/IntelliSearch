@@ -355,6 +355,14 @@ f.fetch(url, mode="http")    # 强制纯 HTTP，永不启动浏览器
 f.fetch(url, mode="render")  # 强制渲染，即使 HTTP 已拿到内容也走一遍浏览器执行 JS
 ```
 
+`mode="render"` 的契约是**要么渲染成功，要么明确告诉你没渲染成**：若渲染能力被
+`IS_RENDER=0` 禁用、或本机找不到内核，不会静默退回 HTTP 冒充成功 —— 返回
+`degraded=True`、`fetch_mode="http"`（已拿到正文时）或 `"none"`，并在 `reason`
+里写明"渲染能力已禁用(IS_RENDER=0)，无法满足 mode=render；已降级为轻量抓取"。
+另外，渲染虽然执行成功、但页面本身是 4xx/5xx（如 Cloudflare 拦截页）时，
+这段 HTML **不算渲染成功**：不采信、`degraded=True`，`reason="渲染返回 HTTP
+503 拦截页，未采信"`，避免把拦截页当正文交给下游。
+
 #### 4.5.2 渲染必要性判定
 
 四类信号命中任一即升级。判定实现集中在 `renderer.needs_render`（`fetcher._looks_incomplete` 只是它的兼容包装，两者共用一套阈值）：
@@ -435,8 +443,8 @@ Playwright 的**同步 API 绑定创建它的线程**。最初按常规写法做
 | 手段 | 实现 |
 |---|---|
 | 抹除自动化指纹 | 启动参数 `--disable-blink-features=AutomationControlled` + `navigator.webdriver` 置 `undefined` |
-| 完整环境伪装 | PC/移动 UA 轮换、`zh-CN` locale、1366×768 viewport、`Accept-Language` |
-| 资源拦截 | 默认 abort `image` / `media` / `font` —— 渲染文字不需要它们，省流量也省时间 |
+| 完整环境伪装 | PC/移动 UA 轮换、1366×768 viewport、`Accept-Language`；locale 随 `lang` 参数映射（zh→`zh-CN`、en→`en-US`，显式 `xx-YY` 原样使用） |
+| 资源拦截 | 默认 abort `image` / `media` / `font` —— 渲染文字不需要它们，省流量也省时间；`IS_RENDER_BLOCK_RES=0` 或单次 `RenderRequest(block_resources=False)` 可关闭拦截（实测关掉后图片请求会真的到达站点） |
 | 遵守 robots | 渲染前同样过 `RobotsCache` 判定 |
 | 不硬刚验证码 | 命中验证页特征时走降级返回，**不反复重试**烧流量 |
 | 限流 | 渲染与 HTTP 共用全局 5 QPS / 主机 crawl-delay 令牌桶 |
@@ -452,6 +460,8 @@ Playwright 的**同步 API 绑定创建它的线程**。最初按常规写法做
 | 页面 JS 报错 | 不影响渲染，继续返回 | `js_errors[:5]` |
 | 4xx 且响应体为空 | 浏览器只得出自带错误页 → 判失败，不冒充正文 | `attempts=[..., "render_err:RENDER_ERROR"]`, `ok=False` |
 | 该主机近期渲染无产出 | 跳过重复启动浏览器（10 分钟内） | `attempts=[..., "render:skip_recent_failure"]` |
+| 显式 `mode="render"` 但渲染被禁用/内核缺失 | 不静默假装成功：返回已拿到的最好结果并明确标注 | `degraded=True`, `reason="渲染能力已禁用(IS_RENDER=0)，无法满足 mode=render…"`, `attempts=[..., "render:unavailable"]` |
+| 渲染执行成功但页面本身 4xx/5xx | 拦截页/错误页不采信，按渲染失败降级 | `degraded=True`, `reason="渲染返回 HTTP 503 拦截页，未采信"`, `ok=False` |
 
 `GET /stats` 与 `GET /render-info` 暴露渲染运行时状态：
 
@@ -560,11 +570,16 @@ isearch --stats                            # 运行状态
 
 | 接口 | 说明 |
 |---|---|
-| `GET /search?q=&top_k=&freshness=&site=&format=json\|context\|markdown` | 检索 |
+| `GET /search?q=&top_k=&freshness=&site=&providers=&format=json\|context\|markdown` | 检索；`providers` 逗号分隔，只跑指定源（如 `providers=bing_rss,sogou`） |
 | `POST /search` | 同上，body 为 JSON |
 | `GET /fetch?url=&mode=auto\|http\|render` | 抓取并抽取正文，`mode` 控制是否走渲染 |
 | `GET /render-info` | 渲染能力状态：内核来源、引擎名、是否可用、逐项统计 |
 | `GET /stats` `GET /health` | 运维 |
+
+HTTP 状态码按检索状态映射：`ok` / `partial` / `no_results` → **200**，
+`blocked` → **403**，`error` → **502**。`no_results` 是"源都正常但确实没匹配"
+的正常业务状态，不再是 502（是否可用看响应体里的 `status` / `ok`）。
+`providers=` 指定的源全部不可用时收敛为 `status=error` 并在 `providers[]` 里说明。
 
 ### 5.4 配置项
 
@@ -578,7 +593,7 @@ isearch --stats                            # 运行状态
 
 ```bash
 python -m pytest tests/ -q                          # 离线
-python -m pytest tests/ -q --run-integration        # 追加 26 项真实网络/真实渲染
+python -m pytest tests/ -q --run-integration        # 追加 29 项真实网络/真实渲染
 ```
 
 **实测结果（本机，2026-10-06）：**
@@ -606,14 +621,16 @@ python -m pytest tests/ -q --run-integration        # 追加 26 项真实网络/
 | `test_providers_fetcher.py` | **检索源 × 真实 SmartFetcher 联合路径**：params 必须透传到 HTTP 层、SERP 不得被启发式升级渲染、硬拦截仍救援且不重复、显式 `mode="render"` 不被内部记忆跳过 |
 | `test_rank_fusion.py` | URL/标题去重、字段合并、相关性/时效/可信度评分、站点与时间过滤、中间页剔除、top_k 截断 |
 | `test_extractor.py` | 正文抽取（含真实文档页）、导航/页脚剔除、元信息、段落切分、截断、类型识别 |
-| `test_engine.py` | **状态收敛**：OK / PARTIAL / NO_RESULTS / ERROR / 限流；缓存命中与不缓存失败结果；输出字段齐备；压缩；会话记忆；冲突检测 |
-| `test_cache.py` | TTL 过期、命名空间隔离、LRU 淘汰、损坏数据不抛异常 |
+| `test_engine.py` | **状态收敛**：OK / PARTIAL / NO_RESULTS / ERROR / 限流；**`providers=` 只跑名单内的源、名单全不匹配收敛 ERROR**；缓存命中与不缓存失败结果；**`cache_key` 区分检索源集合**；输出字段齐备；压缩；会话记忆；冲突检测 |
+| `test_cache.py` | TTL 过期、命名空间隔离、**LRU 淘汰按 rowid 精确定位（同名 key 不跨 namespace 误删）**、损坏数据不抛异常 |
+| `test_http_api.py` | **HTTP 状态码映射**：`ok/partial/no_results`→200、`blocked`→403、`error`→502（JSON/context/markdown 三种格式口径一致）、`providers=` 解析与透传、POST 行为 |
+| `test_mcp_server.py` | **MCP 单次检索**：`format=context` 与 `json` 都只跑一次 `search`（回归：context 曾二次检索）、输出契约 |
 | `test_ratelimit.py` | 令牌桶、全局/会话/主机限流、黑名单、钓鱼站、付费墙标记 |
 | `test_regression_2026_10_06.py` | **假成功回归**：404/403/验证页不得判成功（`fetch` 与 `_fetch_contents` 两条路径）、失败不写缓存、失败分支 key 契约一致、Crawl-delay 生效且缓存命中不排队、导航容器不得压过正文、分词不得丢失实词、疑问词不产生伪词、垃圾批次逐条过滤 |
 | `test_robots.py` | Allow/Disallow 优先级、通配符与 `$` 锚定、agent 匹配、crawl-delay |
-| `test_render.py` | 内核探测、引擎名、降级链判定、四种抓取模式、真实 SPA 渲染、超时生效、并发渲染、干净降级 |
+| `test_render.py` | 内核探测、引擎名、降级链判定、四种抓取模式、**`mode="render"` 在渲染禁用/内核缺失时显式 degraded**、**渲染返回 4xx/5xx 拦截页不采信（假成功回归）**、**`block_resources` 开关与 `lang`/locale 接线（本机站点请求留痕）**、真实 SPA 渲染、超时生效、并发渲染、干净降级 |
 | `test_browser_bundle.py` | **内置内核（11 项）**：包内内核优先级高于系统浏览器、显式路径最优先、缓存高于系统、完全无内核时降级为 `None` 不抛异常、候选去重、安装脚本存在且语法有效、`render` extra 已声明、**包目录扫描不依赖运行时环境变量**、`engine_detail` 在 `pool.info()` 与 `/render-info` 两处都带出内核绝对路径 |
-| `test_renderer.py` | 候选发现与启动参数形状、`needs_render` 参数化、**密度判据按全文统计（骨架页必须判渲染 / 正文充足不得误判）**、`_looks_incomplete` 密度判据、接口契约、真实渲染与自动升级、资源拦截、并发 |
+| `test_renderer.py` | 候选发现与启动参数形状、`needs_render` 参数化、**密度判据按全文统计（骨架页必须判渲染 / 正文充足不得误判）**、**`RenderRequest.block_resources/lang` 透传与 `_locale_for` 映射**、`_looks_incomplete` 密度判据、接口契约、真实渲染与自动升级、资源拦截、并发 |
 | `test_relevance_guard.py` | **反爬软封闸门**：整批无关结果被丢弃、多实词需命中≥2 个、仅域名命中不算、单实词查询不误杀、查询词为空不误杀、被判不可用的源如实上报 |
 | `test_integration.py` | 真实中英文检索、多源管道完整性、软封时结果不外泄（`test_irrelevant_results_never_reach_caller`）、多源可用性（≥2 源，`xfail`）、站点/时效过滤、正文抓取、连续检索稳定性、无结果返回明确状态、超时生效 |
 
@@ -628,6 +645,10 @@ python -m pytest tests/ -q --run-integration        # 追加 26 项真实网络/
 - **SPA 自动升级**：`quotes.toscrape.com/js/` 在 auto 模式下降级为 `fetch_mode="render"`，`selector_found=true`，正文从骨架页变为完整 10 条数据
 - **渲染不可用不致命**：目标主机完全不存在时 `degraded=True`、`fetch_mode="none"`、`attempts=["http_err:UPSTREAM_ERROR", "render_err:RENDER_ERROR"]`，不抛异常
 - **并发渲染全部成功**：3 个并发渲染 `render_ok: 3, failed: 0`（线程模型修复前为 1/3）
+- **HTTP 语义正确**：`/search` 的 `no_results` 返回 200（正常业务状态，不再是 502），`blocked`→403、`error`→502；`?providers=` 只跑指定源，名单全部不可用时收敛为 `status=error` 并逐源说明
+- **MCP 不重复检索**：`format=context` 与 `format=json` 都只跑一次检索（回归前 context 会把整轮检索跑两遍，网络与限流预算翻倍）
+- **渲染假成功已封**：渲染返回 4xx/5xx 拦截页时 `rendered=False`、`degraded=True` 且不采信该 HTML；`mode="render"` 在渲染被禁用/内核缺失时显式返回 `degraded=True` 与原因，不再静默退回 HTTP 冒充成功
+- **渲染开关真的生效**：`IS_RENDER_BLOCK_RES=0` / `RenderRequest(block_resources=False)` 时图片请求会真的到达站点（由本机站点请求留痕硬断言）；`lang` 会映射到浏览器 locale（zh→`zh-CN`、en→`en-US`）
 
 ### 持续集成（GitHub Actions）
 

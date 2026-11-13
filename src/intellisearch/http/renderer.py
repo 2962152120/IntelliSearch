@@ -67,6 +67,36 @@ STEALTH_ARGS = [
 # 默认不加载的资源类型(渲染文本不需要, 且能大幅省流量提速)
 BLOCKED_RESOURCE_TYPES = {"image", "media", "font"}
 
+# 语言短码 -> 完整 locale。Chromium 的 locale 决定 navigator.language /
+# Accept-Language 等, 只给 "zh"/"en" 这类短码时行为依赖内核实现, 因此显式
+# 映射成区域化的完整 locale; 已经是 xx-YY 形态的(如 zh-TW)原样保留。
+_LANG_TO_LOCALE = {"zh": "zh-CN", "en": "en-US"}
+_DEFAULT_LOCALE = "zh-CN"
+
+
+def _locale_for(lang: str, headers: Dict[str, str] = None) -> str:
+    """决定 BrowserContext 的 locale。
+
+    优先级(高 -> 低):
+        1. headers 里的 Accept-Language —— 调用方显式给的请求头最可信;
+        2. lang: zh -> zh-CN, en -> en-US; 形如 xx-YY 的直接用;
+        3. 空 lang -> zh-CN(历史默认值, 保持兼容)。
+
+    单独抽成纯函数是为了能离线单测 —— locale 错了只会表现为
+    navigator.language 不对, 冒烟测试很难发现。
+    """
+    if headers:
+        for key, value in headers.items():
+            if key.lower() == "accept-language" and value:
+                # Accept-Language 可能是 "en-US,en;q=0.9" 这样的列表, 只取第一段
+                return str(value).split(",")[0].strip() or _DEFAULT_LOCALE
+    code = (lang or "").strip().replace("_", "-")
+    if not code:
+        return _DEFAULT_LOCALE
+    if "-" in code:
+        return code
+    return _LANG_TO_LOCALE.get(code.lower(), code)
+
 
 def _in_event_loop() -> bool:
     """当前线程是否运行在 asyncio 事件循环内(Playwright 同步 API 禁用)。"""
@@ -436,7 +466,9 @@ class BrowserRenderer:
                wait_ms: int = None, wait_selector: str = None,
                scroll: bool = False, timeout: float = None,
                headers: Dict[str, str] = None,
-               cookies: list = None) -> RenderedPage:
+               cookies: list = None,
+               block_resources: Optional[bool] = None,
+               lang: str = "") -> RenderedPage:
         """加载并渲染页面, 返回渲染后的 DOM(线程安全入口)。
 
         任务被投递到专用工作线程执行, 因此本方法可从任意线程、
@@ -446,12 +478,17 @@ class BrowserRenderer:
         wait_ms:    额外固定延时(毫秒), 处理慢渲染的 SPA
         wait_selector: 等待某元素出现(SPA 常用)
         scroll:     是否滚动到底部触发懒加载
+        block_resources: 是否拦截图片/视频/字体; None 表示沿用构造时的
+                    block_media(让 IS_RENDER_BLOCK_RES 能真正生效)
+        lang:       期望页面语言(zh/en/zh-TW...), 影响 BrowserContext.locale
         """
         budget = (timeout or self.nav_timeout) + 25.0
 
         def _job():
             return self._render_once(url, wait_until, wait_ms, wait_selector,
-                                     scroll, timeout, headers, cookies)
+                                     scroll, timeout, headers, cookies,
+                                     block_resources=block_resources,
+                                     lang=lang)
 
         if _in_event_loop():
             # 事件循环内: 交给工作线程(其内部本就无事件循环)
@@ -465,10 +502,17 @@ class BrowserRenderer:
                      wait_ms: int = None, wait_selector: str = None,
                      scroll: bool = False, timeout: float = None,
                      headers: Dict[str, str] = None,
-                     cookies: list = None) -> RenderedPage:
+                     cookies: list = None,
+                     block_resources: Optional[bool] = None,
+                     lang: str = "") -> RenderedPage:
         """真正的渲染实现。只允许在工作线程内调用。"""
         nav_timeout = (timeout or self.nav_timeout) * 1000
         extra_wait = self.wait_ms if wait_ms is None else wait_ms
+        # None 表示"沿用构造参数"(BrowserPool 恒传 True, 环境变量关掉拦截时
+        # fetcher 会显式传 False)。曾漏传这个值, 导致 IS_RENDER_BLOCK_RES=0
+        # 完全无效 —— 页面里的图片/视频照样被拦。
+        block = (self.block_media if block_resources is None
+                 else bool(block_resources))
         browser = self._acquire()
         t0 = time.time()
         context = None
@@ -479,8 +523,7 @@ class BrowserRenderer:
         try:
             ctx_args: Dict[str, Any] = {
                 "user_agent": self.ua.get(),
-                "locale": "zh-CN" if not headers else
-                           headers.get("Accept-Language", "zh-CN"),
+                "locale": _locale_for(lang, headers),
                 "viewport": {"width": 1366, "height": 768},
                 "java_script_enabled": True,
                 "ignore_https_errors": True,
@@ -502,7 +545,7 @@ class BrowserRenderer:
             page = context.new_page()
             page.on("pageerror", lambda e: js_errors.append(str(e)[:200]))
 
-            if self.block_media:
+            if block:
                 def _route(route):
                     try:
                         if route.request.resource_type in BLOCKED_RESOURCE_TYPES:

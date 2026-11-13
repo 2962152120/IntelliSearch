@@ -14,10 +14,11 @@ import time
 
 import pytest
 
-from conftest import SPA_JS_MARKER, STATIC_PAGE_MARKER
+from conftest import (FakeHttp, LOCAL_SITE_HITS, SPA_JS_MARKER,
+                      STATIC_PAGE, STATIC_PAGE_MARKER)
 from intellisearch.config import Config
 from intellisearch.http.browser import (BrowserPool, RenderError, RenderRequest,
-                                        find_chromium)
+                                        RenderResult, find_chromium)
 from intellisearch.http.fetcher import SmartFetcher
 
 
@@ -122,6 +123,185 @@ def test_render_disabled_config_makes_pool_none():
         assert f.render_available() is False
     finally:
         f.close()
+
+
+# ---------------------------------------------------------------- 渲染链降级/假成功
+class _StubPool:
+    """假浏览器池: 不启动浏览器, 原样返回预设的渲染结果。"""
+
+    def __init__(self, result: RenderResult):
+        self._result = result
+        self.calls = []
+
+    def available(self):
+        return True
+
+    def engine_name(self):
+        return "chromium"
+
+    def render(self, req):
+        self.calls.append(req)
+        return self._result
+
+    def close(self, timeout=None):
+        pass
+
+
+def test_forced_render_mode_degrades_explicitly_when_disabled():
+    """mode="render" 而渲染被禁用: 必须显式标注降级, 绝不静默退回 http。
+
+    修复前 need_render 跟着 render_enabled 走, 这里会直接走 HTTP 提前返回:
+    degraded=False、reason=""、fetch_mode="http" —— 调用方以为渲染成功了。
+    """
+    http = FakeHttp(default_text=STATIC_PAGE)
+    f = SmartFetcher(Config(render_enabled=False), http=http)
+    try:
+        o = f.fetch("https://example.com/static", mode="render", timeout=5,
+                    retries=0)
+    finally:
+        f.close()
+    # 已拿到的正文与 ok 不能被破坏
+    assert o.ok is True
+    assert STATIC_PAGE_MARKER in o.text
+    # tier 用实际路径
+    assert o.fetch_mode == "http" and o.tier == "http"
+    assert o.rendered is False
+    # 但降级必须显式可见
+    assert o.degraded is True
+    assert "禁用" in o.reason and "降级" in o.reason, o.reason
+    assert "无法满足 mode=render" in o.reason, o.reason
+    assert "render:disabled" in o.attempts, o.attempts
+    assert f.stats["degraded"] == 1
+    assert f.stats["render_ok"] == 0
+
+
+def test_auto_mode_with_render_disabled_stays_http():
+    """对照: 渲染关闭时 mode="auto" 的静态页仍是预期路径, 不应标成降级。"""
+    f = SmartFetcher(Config(render_enabled=False),
+                     http=FakeHttp(default_text=STATIC_PAGE))
+    try:
+        o = f.fetch("https://example.com/static", mode="auto", timeout=5,
+                    retries=0)
+    finally:
+        f.close()
+    assert o.ok is True
+    assert o.fetch_mode == "http" and o.tier == "http"
+    assert o.degraded is False
+    assert o.reason == ""
+
+
+def test_forced_render_mode_reports_kernel_unavailable():
+    """mode="render" 而内核不可用时: 走原"渲染内核不可用"提示并显式降级。"""
+    class _UnavailablePool:
+        def available(self):
+            return False
+
+        def engine_name(self):
+            return "none"
+
+        def close(self, timeout=None):
+            pass
+
+    f = SmartFetcher(Config(render_enabled=True),
+                     http=FakeHttp(default_text=STATIC_PAGE),
+                     pool=_UnavailablePool())
+    try:
+        o = f.fetch("https://example.com/static", mode="render", timeout=5,
+                    retries=0)
+    finally:
+        f.close()
+    assert o.ok is True
+    assert o.degraded is True
+    assert o.tier == "http"
+    assert o.rendered is False
+    assert "渲染内核不可用" in o.reason, o.reason
+    assert "render:unavailable" in o.attempts, o.attempts
+    assert f.stats["degraded"] == 1
+
+
+def test_render_intercept_page_is_not_fake_success():
+    """渲染返回 4xx/5xx 拦截页时不能算成功(假成功回归)。
+
+    修复前只看 r.html 非空: 503 拦截页会被当成渲染成功 ——
+    degraded=False、rendered=True、stats["render_ok"]++ 且 reason 被清空,
+    与 _note_render(把 status>=400 记为 dead host)自相矛盾。
+    """
+    pool = _StubPool(RenderResult(status=503,
+                                  html="<html>Cloudflare 拦截页</html>"))
+    f = SmartFetcher(Config(render_enabled=True), http=FakeHttp(default_text=""),
+                     pool=pool)
+    try:
+        o = f.fetch("https://blocked.example/x", mode="render", timeout=5,
+                    retries=0)
+    finally:
+        f.close()
+    assert pool.calls, "应尝试渲染"
+    assert "render:503" in o.attempts, o.attempts
+    assert "503" in o.reason, o.reason
+    assert o.rendered is False
+    assert o.degraded is True
+    assert o.tier != "render" and o.fetch_mode != "render"
+    assert o.ok is False
+    assert "Cloudflare" not in o.text, "拦截页 html 被采信了"
+    assert f.stats["render_ok"] == 0
+    assert f.stats["degraded"] == 1
+
+
+def test_render_intercept_page_does_not_overwrite_tier1_text():
+    """拦截页 html 不得覆盖 Tier1 已拿到的正文, 应降级返回好内容。"""
+    pool = _StubPool(RenderResult(status=403,
+                                  html="<html>403 Forbidden</html>"))
+    f = SmartFetcher(Config(render_enabled=True),
+                     http=FakeHttp(default_text=STATIC_PAGE), pool=pool)
+    try:
+        o = f.fetch("https://example.com/static", mode="render", timeout=5,
+                    retries=0)
+    finally:
+        f.close()
+    assert STATIC_PAGE_MARKER in o.text
+    assert "403 Forbidden" not in o.text
+    assert o.status == 200
+    assert o.ok is True               # 用 Tier1 的好内容降级返回
+    assert o.rendered is False
+    assert o.degraded is True
+    assert o.tier == "http"
+    assert "403" in o.reason, o.reason
+
+
+def test_render_200_html_still_counts_as_success():
+    """对照: status=200 的正常渲染成功路径不受影响。"""
+    pool = _StubPool(RenderResult(status=200,
+                                  html="<html><body>完整正文</body></html>"))
+    f = SmartFetcher(Config(render_enabled=True), http=FakeHttp(default_text=""),
+                     pool=pool)
+    try:
+        o = f.fetch("https://ok.example/x", mode="render", timeout=5, retries=0)
+    finally:
+        f.close()
+    assert o.ok is True
+    assert o.rendered is True
+    assert o.fetch_mode == "render" and o.tier == "render"
+    assert o.degraded is False
+    assert o.reason == ""
+    assert f.stats["render_ok"] == 1
+    assert f.stats["degraded"] == 0
+
+
+def test_render_status_zero_with_html_keeps_legacy_success():
+    """status==0 但有 html(拿不到响应码)保持旧语义: 按成功, status 落 200。"""
+    pool = _StubPool(RenderResult(status=0,
+                                  html="<html><body>正文</body></html>"))
+    f = SmartFetcher(Config(render_enabled=True), http=FakeHttp(default_text=""),
+                     pool=pool)
+    try:
+        o = f.fetch("https://nocode.example/x", mode="render", timeout=5,
+                    retries=0)
+    finally:
+        f.close()
+    assert o.ok is True
+    assert o.rendered is True
+    assert o.status == 200
+    assert o.degraded is False
 
 
 # ---------------------------------------------------------------- 真实渲染
@@ -239,3 +419,46 @@ def test_nonexistent_host_degrades_cleanly():
         assert len(o.attempts) >= 1
     finally:
         f.close()
+
+
+@pytest.mark.integration
+def test_render_block_resources_flag_is_wired(local_site):
+    """RenderRequest.block_resources 必须真的控制资源拦截。
+
+    回归: 该字段曾经没传给 renderer, 恒按 block_media=True 拦截,
+    IS_RENDER_BLOCK_RES=0 完全无效。这里用本机站点的请求命中记录做硬证据:
+    拦截时服务端**看不到** /img.png, 放行时必须看到。
+    """
+    pool = _pool()
+    LOCAL_SITE_HITS.clear()
+    blocked = pool.render(RenderRequest(
+        url=local_site + "/pics", timeout=30, settle_ms=1500,
+        block_resources=True))
+    assert blocked.blocked_requests >= 1, "block_resources=True 未拦截任何资源"
+    assert "/img.png" not in LOCAL_SITE_HITS, (
+        f"图片请求不应到达服务端: {LOCAL_SITE_HITS}")
+
+    LOCAL_SITE_HITS.clear()
+    loaded = pool.render(RenderRequest(
+        url=local_site + "/pics", timeout=30, settle_ms=1500,
+        block_resources=False))
+    assert loaded.blocked_requests == 0, "block_resources=False 仍在拦截资源"
+    assert "/img.png" in LOCAL_SITE_HITS, (
+        f"放行后图片请求应到达服务端: {LOCAL_SITE_HITS}")
+
+
+@pytest.mark.integration
+def test_render_lang_controls_locale(local_site):
+    """RenderRequest.lang 必须影响 BrowserContext.locale(navigator.language)。
+
+    回归: req.lang 曾经完全未接线, locale 恒为 zh-CN —— 抓英文站点时
+    navigator.language 撒谎, 部分站点据此返回中文/降级页面。
+    """
+    pool = _pool()
+    en = pool.render(RenderRequest(url=local_site + "/lang", timeout=30,
+                                   lang="en", settle_ms=800))
+    zh = pool.render(RenderRequest(url=local_site + "/lang", timeout=30,
+                                   lang="zh", settle_ms=800))
+    assert "en-US" in en.html, f"lang=en 未生效: {en.html[:300]}"
+    assert "zh-CN" in zh.html, f"lang=zh 未生效: {zh.html[:300]}"
+
