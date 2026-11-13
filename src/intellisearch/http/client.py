@@ -179,25 +179,36 @@ class HttpClient:
                 with self._global_sem, self._host_sem(host):
                     req_kwargs = dict(timeout=timeout, headers=hdrs, params=params)
                     cli, _ = self._client_for(proxy or "")
-                    resp = cli.get(url, **req_kwargs)
-                elapsed = int((time.time() - t0) * 1000)
-                ct = resp.headers.get("content-type", "").split(";")[0].strip().lower()
-                fr = FetchResponse(
-                    url=str(resp.url), status_code=resp.status_code,
-                    headers=dict(resp.headers), content_type=ct,
-                    elapsed_ms=elapsed, retries=attempt - 1,
-                    from_proxy=proxy or "",
-                )
+                    # 必须用 stream() 而不是 get(): 前者在读到响应头后就能
+                    # 判断 content-type / 状态码, 后者会把**整个响应体**先
+                    # 下载进内存(get() 内部立即 read)。旧实现正是后者, 于是
+                    # 图片/视频哪怕配置了"不下载媒体", 也已经完整下载过一遍,
+                    # 超大页面也要等全量到齐 — fetch_max_bytes 只是"事后截断"。
+                    with cli.stream("GET", url, **req_kwargs) as resp:
+                        elapsed = int((time.time() - t0) * 1000)
+                        ct = (resp.headers.get("content-type", "")
+                              .split(";")[0].strip().lower())
+                        fr = FetchResponse(
+                            url=str(resp.url), status_code=resp.status_code,
+                            headers=dict(resp.headers), content_type=ct,
+                            elapsed_ms=elapsed, retries=attempt - 1,
+                            from_proxy=proxy or "",
+                        )
 
-                if not allow_media and self._is_media(ct, url):
-                    fr.skipped = True
-                    fr.skip_reason = f"资源过滤: {ct or 'unknown'}"
-                    log.debug("跳过媒体资源 %s (%s)", url, ct)
-                    return fr
+                        if not allow_media and self._is_media(ct, url):
+                            fr.skipped = True
+                            fr.skip_reason = f"资源过滤: {ct or 'unknown'}"
+                            # 直接 return: 流在 with 退出时关闭, 响应体
+                            # 一个字节都不会被读取。
+                            log.debug("跳过媒体资源 %s (%s), 未读取响应体", url, ct)
+                            return fr
 
-                # 读取文本(限制大小, 防止超大页面打爆内存)
-                raw = resp.content[: self.cfg.fetch_max_bytes]
-                enc = resp.encoding or _detect_encoding(resp.headers, raw) or "utf-8"
+                        # 只读到上限; 达到上限立刻停止下载(不再白拉剩余字节)
+                        raw = self._read_limited(resp, self.cfg.fetch_max_bytes)
+                        # 在响应对象还活着时解析编码(httpx.Headers 大小写
+                        # 不敏感; 转成普通 dict 后再查 content-type 可能漏)
+                        enc = _detect_encoding(resp.headers, raw) or "utf-8"
+
                 try:
                     fr.text = raw.decode(enc, errors="replace")
                 except (LookupError, UnicodeDecodeError):
@@ -253,6 +264,28 @@ class HttpClient:
         raise last_err or UpstreamError(f"请求失败: {url}", source=source)
 
     # ---------- 工具 ----------
+    @staticmethod
+    def _read_limited(resp: httpx.Response, limit: int) -> bytes:
+        """按上限流式读取响应体, 达到上限立即停止。
+
+        旧实现 `resp.content[:limit]` 会先把整个响应体读进内存再切片, 对
+        超大页面/二进制资源等于"完整下载后截断"。这里改成逐块读取, 超过
+        `fetch_max_bytes` 就 break —— 节省的不只是内存, 还有带宽。
+        """
+        limit = max(0, int(limit or 0))
+        if limit == 0:
+            return b""
+        buf = []
+        total = 0
+        for chunk in resp.iter_bytes():
+            if not chunk:
+                continue
+            buf.append(chunk)
+            total += len(chunk)
+            if total >= limit:
+                break
+        return b"".join(buf)[:limit]
+
     def _is_media(self, ct: str, url: str) -> bool:
         if ct and any(ct.startswith(p) for p in MEDIA_CT_PREFIXES):
             if ct == "application/pdf":

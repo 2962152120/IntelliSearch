@@ -19,11 +19,13 @@ services:
       IS_RESPECT_ROBOTS: "true"
       IS_LOG_LEVEL: "INFO"
       # 代理池（可选，逗号分隔；支持 http:// 与 socks5://）
-      IS_PROXIES: ""
+      # 用 ${VAR:-} 从宿主机环境/.env 透传：直接写死空串会把宿主机上
+      # 已设置的变量覆盖成空值，看起来还像是"必须在这里填"。
+      IS_PROXIES: "${IS_PROXIES:-}"
       # 商业检索源（可选，配置后自动启用）
-      TAVILY_API_KEY: ""
-      SERPAPI_API_KEY: ""
-      BRAVE_API_KEY: ""
+      TAVILY_API_KEY: "${TAVILY_API_KEY:-}"
+      SERPAPI_API_KEY: "${SERPAPI_API_KEY:-}"
+      BRAVE_API_KEY: "${BRAVE_API_KEY:-}"
     volumes:
       - isearch-data:/data
     restart: unless-stopped
