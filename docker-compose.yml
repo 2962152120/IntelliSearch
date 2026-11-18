@@ -1,10 +1,11 @@
 services:
   intellisearch:
     build: .
-    image: intellisearch:1.0.0
+    image: intellisearch:1.0.1
     container_name: intellisearch
     ports:
-      - "8787:8787"
+      # 宿主侧绑回环, 不直接暴露公网; 需要局域网访问再改成 "8787:8787" 并配 IS_API_TOKEN
+      - "127.0.0.1:8787:8787"
     environment:
       # 检索源（逗号分隔，按优先级排列）
       IS_PROVIDERS: "bing_rss,bing_html,sogou,so360"
@@ -18,6 +19,9 @@ services:
       IS_SESSION_QPS: "1"
       IS_RESPECT_ROBOTS: "true"
       IS_LOG_LEVEL: "INFO"
+      # 服务鉴权: 非空则 /search /fetch /stats 需 Authorization: Bearer <token>
+      IS_API_TOKEN: ""
+      IS_CORS_ORIGINS: "*"
       # 代理池（可选，逗号分隔；支持 http:// 与 socks5://）
       # 用 ${VAR:-} 从宿主机环境/.env 透传：直接写死空串会把宿主机上
       # 已设置的变量覆盖成空值，看起来还像是"必须在这里填"。

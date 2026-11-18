@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "intellisearch"
-version = "1.0.0"
+version = "1.0.1"
 description = "面向大模型的自研联网检索工具：多源聚合、结构化输出、可直接作为上下文引用"
 readme = "README.md"
 requires-python = ">=3.9"

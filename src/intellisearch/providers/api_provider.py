@@ -68,9 +68,14 @@ class TavilyProvider(_JSONProvider):
         super().__init__(config)
         self.api_key = self.cfg.tavily_key
 
+    def _headers(self) -> dict:
+        # 密钥走 Authorization header, 绝不进 URL query —— 否则会被
+        # HttpClient 的日志/异常/响应元数据带出去(见 client.redact_url)。
+        return {"Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"}
+
     def _params(self, query: str, options: QueryOptions) -> dict:
         return {
-            "api_key": self.api_key,
             "query": query,
             "max_results": min(max(options.top_k * 2, 10), 20),
             "search_depth": "basic",
@@ -100,8 +105,13 @@ class SerpAPIProvider(_JSONProvider):
         super().__init__(config)
         self.api_key = self.cfg.serpapi_key
 
+    def _headers(self) -> dict:
+        # SerpAPI 支持 X-API-Key header; 用 header 而非 query 参数, 避免
+        # 密钥出现在 URL 中被日志/异常/代理链路记录。
+        return {"X-API-Key": self.api_key}
+
     def _params(self, query: str, options: QueryOptions) -> dict:
-        p = {"q": query, "api_key": self.api_key, "engine": "google",
+        p = {"q": query, "engine": "google",
              "num": min(max(options.top_k * 2, 10), 20)}
         if options.lang == "zh":
             p["hl"] = "zh-cn"

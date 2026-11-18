@@ -136,6 +136,11 @@ def rank(results: List[SearchResult], terms: Sequence[str],
         rel = score_relevance(r, terms, full_query)
         fresh = score_freshness(r)
         cred = credibility_of(r, cfg)
+        # 付费墙降权: SafetyGuard 标记 extra["_penalty"](如 0.85), 此前
+        # 只标记不生效; 这里真正应用到可信度维度, 付费墙结果仍保留但靠后。
+        penalty = r.extra.get("_penalty", 1.0)
+        if isinstance(penalty, (int, float)) and 0 < penalty <= 1:
+            cred = cred * penalty
         leng = score_length(r)
         # 时效性权重在有明确时间需求时提高
         w_f = cfg.w_freshness

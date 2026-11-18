@@ -60,6 +60,13 @@ class BlockedError(IntelliSearchError):
     code = "BLOCKED"
     retryable = True
 
+    def __init__(self, message: str, source: str = "", status_code: int = 0, **detail):
+        # 显式提升 status_code 为属性: 基类把它塞进 detail 字典, 导致调用方
+        # (如 HttpClient 判断 403 不重试) 访问 e.status_code 时 AttributeError。
+        super().__init__(message, source=source, status_code=status_code, **detail)
+        self.source = source
+        self.status_code = status_code
+
 
 class RobotsDisallowed(IntelliSearchError):
     """robots.txt 禁止访问。"""
@@ -77,3 +84,9 @@ class SafetyBlocked(IntelliSearchError):
     """命中内容安全黑名单。"""
 
     code = "SAFETY_BLOCKED"
+
+
+class UnsafeUrlError(IntelliSearchError):
+    """目标 URL 指向非公网地址(SSRF 防护)。"""
+
+    code = "UNSAFE_URL"

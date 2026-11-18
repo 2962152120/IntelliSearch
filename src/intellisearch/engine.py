@@ -64,6 +64,16 @@ class SearchEngine:
         self.rewriter = rewriter
 
         names = list(providers or self.cfg.providers or DEFAULT_PROVIDERS)
+        # 商业源"配了 Key 即自动启用": 未显式指定 providers 时并入有 key 的源。
+        # 显式传 providers= 时尊重调用方的精确选择。
+        if providers is None:
+            for n in ("tavily", "serpapi", "brave"):
+                if n not in names and n in REGISTRY:
+                    try:
+                        if REGISTRY[n](self.cfg).is_available():
+                            names.append(n)
+                    except Exception:            # noqa: BLE001
+                        pass
         self.providers: List[SearchProvider] = []
         for n in names:
             cls = REGISTRY.get(n)
@@ -248,6 +258,13 @@ class SearchEngine:
             "http"   只用轻量 HTTP(最快, 适合确定是静态页的场景)
             "render" 强制走 Chromium 渲染(JS 动态页面)
         """
+        # SSRF 前置校验(最外层): 在 robots 查询与缓存之前拒绝非公网地址。
+        from .safety.urlcheck import validate_public_url
+        try:
+            validate_public_url(url)
+        except Exception as e:                # noqa: BLE001 - 统一收敛为字典
+            return {"url": url, "ok": False, "status": getattr(e, "code", "UNSAFE_URL"),
+                    "http_status": 0, "clean_text": "", "message": getattr(e, "message", str(e))}
         respect = self.cfg.respect_robots if respect_robots is None else respect_robots
         delay = 0.0
         if respect:
@@ -256,7 +273,7 @@ class SearchEngine:
                 return {"url": url, "ok": False, "status": "robots_disallowed",
                         "http_status": 0, "clean_text": "", "message":
                         "robots.txt 禁止访问该地址"}
-        ck = hashlib.md5(f"page:{url}:{max_chars}:{mode}".encode()).hexdigest()
+        ck = self._page_cache_key(url, max_chars, mode)
         if self.cache.enabled:
             hit = self.cache.get(ck, "page")
             if hit:
@@ -312,6 +329,12 @@ class SearchEngine:
     # ------------------------------------------------------------------
     # 内部
     # ------------------------------------------------------------------
+    @staticmethod
+    def _page_cache_key(url: str, max_chars: int, mode: str = "auto") -> str:
+        """正文缓存键 —— fetch() 与 _fetch_contents() 共用, 避免同一页被
+        两条路径用不同 key 各抓一次。mode 纳入键: 渲染与纯 HTTP 正文不同。"""
+        return hashlib.md5(f"page:{url}:{max_chars}:{mode}".encode()).hexdigest()
+
     def _merge_options(self, options: QueryOptions,
                        overrides: Dict[str, Any]) -> QueryOptions:
         if options is None:
@@ -320,12 +343,15 @@ class SearchEngine:
             return options
         import dataclasses
         valid = {f.name for f in dataclasses.fields(QueryOptions)}
+        applied = {}
         for k, v in overrides.items():
             if k in valid:
-                setattr(options, k, v)
+                applied[k] = v
             else:
                 log.warning("忽略未知参数: %s", k)
-        return options
+        # 复制而非原地 setattr: 调用方传入的 QueryOptions 不该被悄悄改写,
+        # 否则复用同一个 options 对象多次检索时参数会互相污染。
+        return dataclasses.replace(options, **applied) if applied else options
 
     def _fetch_contents(self, results: List[SearchResult], opts: QueryOptions,
                         ctx: ProviderContext) -> None:
@@ -340,8 +366,7 @@ class SearchEngine:
                     if not allowed:
                         r.extra["fetch_status"] = "robots_disallowed"
                         return
-                ck = hashlib.md5(f"page:{r.url}:{opts.max_content_chars}"
-                                 .encode()).hexdigest()
+                ck = self._page_cache_key(r.url, opts.max_content_chars, "auto")
                 if self.cache.enabled:
                     hit = self.cache.get(ck, "page")
                     if hit:
@@ -405,6 +430,11 @@ class SearchEngine:
             failed = [r for r in reports if not r.ok]
             return Status.PARTIAL if failed else Status.OK
         if reports and all(not r.ok for r in reports):
+            # 区分"故障"与"正常无结果": irrelevant(软封换页)/empty(没匹配)/
+            # skipped 是诚实的可判定状态 -> NO_RESULTS; 真故障才 ERROR。
+            soft = {"irrelevant", "empty", "skipped"}
+            if all(r.status in soft for r in reports):
+                return Status.NO_RESULTS
             return Status.ERROR
         return Status.NO_RESULTS
 

@@ -96,18 +96,44 @@ def make_handler(holder: _EngineHolder):
         server_version = "IntelliSearch/1.0"
 
         # ---------- 基础 ----------
+        def _cors_origin(self) -> Optional[str]:
+            """按配置决定 CORS 来源: '*' 通配, 否则校验 Origin 是否在白名单。"""
+            cfg = getattr(holder, "cfg", None)   # 兼容测试里只提供 get() 的 FakeHolder
+            origins = (getattr(cfg, "cors_origins", None) or []) if cfg is not None else []
+            if "*" in origins:
+                return "*"
+            origin = self.headers.get("Origin")
+            if origin and origin in origins:
+                return origin
+            return None
+
         def _send(self, code: int, body: bytes, ctype: str = "application/json"):
             self.send_response(code)
             self.send_header("Content-Type", f"{ctype}; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
-            self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+            origin = self._cors_origin()
+            if origin:
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Vary", "Origin")
+                self.send_header("Access-Control-Allow-Headers",
+                                 "Content-Type, Authorization, X-API-Key")
+                self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
             self.end_headers()
             try:
                 self.wfile.write(body)
             except (BrokenPipeError, ConnectionResetError):
                 pass
+
+        def _authorized(self) -> bool:
+            """可选 API token 鉴权。token 未配置时放行(本地默认开发模式)。"""
+            cfg = getattr(holder, "cfg", None)   # 兼容测试里只提供 get() 的 FakeHolder
+            token = getattr(cfg, "api_token", "") if cfg is not None else ""
+            if not token:
+                return True
+            supplied = (self.headers.get("Authorization", "").removeprefix("Bearer ")
+                        or self.headers.get("X-API-Key", ""))
+            import hmac
+            return hmac.compare_digest(supplied, token)
 
         def _json(self, code: int, obj: Any):
             self._send(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"))
@@ -124,9 +150,12 @@ def make_handler(holder: _EngineHolder):
             path = u.path.rstrip("/") or "/"
             q = parse_qs(u.query)
             try:
+                if path not in ("/health", "/ping") and not self._authorized():
+                    self._json(401, {"ok": False, "message": "未授权: 需要有效的 API token"})
+                    return
                 if path in ("/health", "/ping"):
                     self._json(200, {"ok": True, "service": "intellisearch",
-                                     "version": "1.0.0"})
+                                     "version": "1.0.1"})
                 elif path == "/stats":
                     self._json(200, holder.get().stats())
                 elif path == "/search":
@@ -161,7 +190,16 @@ def make_handler(holder: _EngineHolder):
             if path != "/search":
                 self._json(404, {"ok": False, "message": f"未找到路由 {path}"})
                 return
+            if not self._authorized():
+                self._json(401, {"ok": False, "message": "未授权: 需要有效的 API token"})
+                return
             length = int(self.headers.get("Content-Length") or 0)
+            _cfg = getattr(holder, "cfg", None)
+            max_bytes = getattr(_cfg, "max_body_bytes", 1_000_000) if _cfg is not None else 1_000_000
+            if length > max_bytes:
+                self._json(413, {"ok": False,
+                                 "message": f"请求体过大(上限 {max_bytes} 字节)"})
+                return
             raw = self.rfile.read(length) if length else b"{}"
             try:
                 body = json.loads(raw.decode("utf-8") or "{}")

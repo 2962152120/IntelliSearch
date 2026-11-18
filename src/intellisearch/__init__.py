@@ -9,7 +9,7 @@
 
 本模块采用惰性导入, 只 import 包本身不会触发重量级依赖加载。
 """
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 from .models import (SearchResult, SearchResponse, QueryOptions, SourceType,
                      Status, Freshness, ParsedQuery, ProviderReport)

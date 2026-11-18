@@ -43,15 +43,24 @@ _WEAK_TERMS = {"什么", "怎么", "如何", "哪些", "哪个", "多少", "几�
 
 # 权威域名: 只命中 1 个实词时, 这些站点的结果仍算可信
 # (官网/官方文档确实常以产品名单页的形式命中)。
-_AUTHORITATIVE = ("python.org", "docs.", "developer.", "github.com",
-                  "microsoft.com", "mozilla.org", "w3.org", "runoob.com",
-                  "fastapi.tiangolo.com", "nginx.org", "apache.org",
-                  "oracle.com", "golang.org", "rust-lang.org", "npmjs.com")
+_AUTHORITATIVE = ("python.org", "docs.python.org", "developer.mozilla.org",
+                  "github.com", "microsoft.com", "mozilla.org", "w3.org",
+                  "runoob.com", "fastapi.tiangolo.com", "nginx.org",
+                  "apache.org", "oracle.com", "golang.org", "rust-lang.org",
+                  "npmjs.com")
 
 
 def _is_authoritative(r: SearchResult) -> bool:
-    url = (r.url or "").lower()
-    return any(m in url for m in _AUTHORITATIVE)
+    # 用 hostname 精确/后缀匹配, 不能用 URL 子串 —— 后者会被
+    # `https://evil.com/?ref=github.com` 绕过闸门。
+    from urllib.parse import urlparse
+    try:
+        host = (urlparse(r.url or "").hostname or "").lower().rstrip(".")
+    except Exception:                        # noqa: BLE001
+        return False
+    if not host:
+        return False
+    return any(host == h or host.endswith("." + h) for h in _AUTHORITATIVE)
 
 
 def _strong_terms(terms: Sequence[str]) -> List[str]:
@@ -326,6 +335,17 @@ def fuse(results: Sequence[SearchResult], parsed: ParsedQuery,
     cfg = cfg or DEFAULT_CONFIG
     deduped = dedupe(results)
     kept, stats = filter_results(deduped, options, time_from, time_to)
+    # 布尔 NOT: `-词` / `NOT 词` 是明确的排除意图, 必须在结果侧生效 ——
+    # not_ 虽被解析并存进 ParsedQuery, 从此前从未参与过滤。只在标题/摘要/
+    # 正文中判定, URL 不计(避免域名误伤)。
+    if parsed.not_:
+        excl = [w.lower() for w in parsed.not_ if w and len(w) >= 2]
+        if excl:
+            before = len(kept)
+            kept = [r for r in kept if not any(
+                w in f"{r.title} {r.snippet} {(r.clean_text or '')[:2000]}".lower()
+                for w in excl)]
+            stats["boolean_not"] = before - len(kept)
     terms = parsed.terms or parsed.must or [parsed.effective]
     ranked = rank(kept, terms, parsed.effective, cfg, options)
     # 多源命中加成(共识度): 越多独立源命中, 越可信

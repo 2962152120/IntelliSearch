@@ -108,6 +108,7 @@ class QueryOptions:
                 "1" if self.fetch_content else "0",
                 str(self.max_content_chars),
                 ",".join(sorted(self.providers or [])),
+                str(self.vertical or ""),
             ]
         )
         return hashlib.sha1(payload.encode("utf-8")).hexdigest()

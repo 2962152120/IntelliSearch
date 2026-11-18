@@ -29,8 +29,16 @@ class TokenBucket:
 
     def consume(self, tokens: float = 1.0, block: bool = False,
                 timeout: float = 0.0) -> bool:
-        """取用令牌。不足时返回 False(或阻塞等待)。"""
-        deadline = time.monotonic() + timeout if block else 0.0
+        """取用令牌。不足时返回 False(或阻塞等待)。
+
+        block=True 且 timeout<=0 时给一个保守的 5s 上限 —— 旧实现把 deadline
+        设成 now, 导致阻塞模式"立即返回 False", 与 block 语义自相矛盾。
+        """
+        if block:
+            wait_cap = timeout if timeout > 0 else 5.0
+            deadline = time.monotonic() + wait_cap
+        else:
+            deadline = 0.0
         while True:
             with self._lock:
                 now = time.monotonic()
@@ -46,6 +54,11 @@ class TokenBucket:
             if time.monotonic() + deficit > deadline:
                 return False
             time.sleep(min(deficit, 0.5))
+
+    def refund(self, tokens: float = 1.0) -> None:
+        """归还令牌(上限不超过桶容量)。用于跨桶原子性失败时回滚。"""
+        with self._lock:
+            self._tokens = min(self.capacity, self._tokens + tokens)
 
     @property
     def available(self) -> float:
@@ -90,6 +103,9 @@ class RateLimiter:
         if session_id:
             b = self._session_bucket(session_id)
             if not b.consume(1.0, block=False):
+                # 会话桶失败时把刚扣掉的全局令牌还回去 —— 否则一次会话限流
+                # 会白白吃掉一个全局配额, 237 个不同会话的滥用能拖垮全局。
+                self.global_bucket.refund(1.0)
                 raise RateLimitError(
                     f"会话 {session_id} 检索过于频繁(上限 {b.rate:.1f} QPS)")
 
@@ -108,7 +124,10 @@ class RateLimiter:
             wait = max(0.0, next_ok - now)
             self._hosts[host] = max(now, next_ok) + delay
         if wait > 0:
-            time.sleep(min(wait, 5.0))
+            # 完整遵守站点声明的 crawl-delay(此前 min(wait, 5.0) 会截断,
+            # 声明 7s/10s 的站点实际只等 5s —— 等于没遵守 robots)。
+            # 60s 上限只是防止恶意超大值把线程挂死, 正常站点远低于此。
+            time.sleep(min(wait, 60.0))
 
     def stats(self) -> dict:
         return {

@@ -15,6 +15,10 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+# 测试进程可信: 多个测试用本机 HTTP server(127.0.0.1)验证抓取/渲染链路,
+# 显式开启 SSRF 本地豁免。生产环境绝不设置此变量。
+os.environ.setdefault("IS_ALLOW_LOCALHOST", "1")
+
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 SERP_DIR = FIXTURES / "serp"
 

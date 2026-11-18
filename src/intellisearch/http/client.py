@@ -21,7 +21,8 @@ import httpx
 
 from ..config import Config, DEFAULT_CONFIG
 from ..errors import (BlockedError, IntelliSearchError as IntelliSearchErrorBase,
-                      TimeoutError_, UpstreamError)
+                      TimeoutError_, UnsafeUrlError, UpstreamError)
+from ..safety.urlcheck import check_redirect_target, validate_public_url
 from .ua import UAPool
 
 log = logging.getLogger("intellisearch.http")
@@ -39,6 +40,31 @@ MEDIA_CT_PREFIXES = ("image/", "video/", "audio/", "font/", "application/font",
 BLOCK_TOKENS = ("captcha", "安全验证", "人机验证", "请完成安全验证", "验证码",
                 "unusual traffic", "are you a human", "robot check",
                 "访问验证", "请求异常", "检测到异常访问")
+
+# 日志/诊断输出中必须脱敏的查询参数名(大小写不敏感)。
+# 商业检索源的 key 即便已尽量走 header, 仍可能有调用方通过 params 传入;
+# 一旦明文进日志或异常消息, 就是凭据泄露。
+_SENSITIVE_PARAMS = ("api_key", "apikey", "key", "token", "access_token",
+                     "secret", "password", "auth")
+
+
+def redact_url(url: str) -> str:
+    """把 URL 查询串中的敏感参数值替换为 ***, 用于日志与异常消息。
+
+    不修改原 URL, 也不影响实际发出的请求 —— 只在"给人看"的地方脱敏。
+    """
+    if not url:
+        return url
+    try:
+        from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+        p = urlparse(url)
+        if not p.query:
+            return url
+        pairs = [(k, "***" if k.lower() in _SENSITIVE_PARAMS else v)
+                 for k, v in parse_qsl(p.query, keep_blank_values=True)]
+        return urlunparse(p._replace(query=urlencode(pairs)))
+    except Exception:                            # noqa: BLE001
+        return "<url redacted>"
 
 
 @dataclass
@@ -99,7 +125,21 @@ class HttpClient:
             # socks5:// 需要 httpx[socks]; 缺失时 httpx 会抛明确异常,
             # 这里不做静默处理, 让配置错误可见
             kwargs["proxy"] = proxy
+        # 每跳重定向后复查目标: follow_redirects=True 时 httpx 会自动跟随,
+        # response hook 在每一跳(含最终响应)触发, 一旦发现跳转指向内网/元数据
+        # 地址立即抛 UnsafeUrlError 中断 —— 否则 169.254.169.254 这类重定向
+        # 会在用户毫无察觉的情况下被请求。
+        kwargs["event_hooks"] = {"response": [self._guard_redirect]}
         return httpx.Client(**kwargs)
+
+    @staticmethod
+    def _guard_redirect(response: httpx.Response) -> None:
+        """httpx response hook: 拦截指向非公网地址的重定向。"""
+        try:
+            check_redirect_target(str(response.url))
+        except UnsafeUrlError:
+            # 3xx 跳向内网时, 下一个请求还没发出; 抛错由 get() 的 except 收敛。
+            raise
 
     @property
     def client(self) -> httpx.Client:
@@ -160,7 +200,12 @@ class HttpClient:
             params: Dict[str, Any] = None, timeout: float = None,
             retries: int = None, allow_media: bool = None,
             lang: str = "zh", source: str = "") -> FetchResponse:
-        """带重试的 GET。抛出 UpstreamError / TimeoutError_ / BlockedError。"""
+        """带重试的 GET。抛出 UpstreamError / TimeoutError_ / BlockedError /
+        UnsafeUrlError(目标非公网)。"""
+        # SSRF 前置校验: 用户可控的 /fetch 入口若传入内网/元数据地址, 在任何
+        # 网络连接建立之前就拒绝。重定向跳转由 _guard_redirect 逐跳复查。
+        validate_public_url(url)
+        safe_url = redact_url(url)   # 仅用于日志/异常/响应元数据, 不含明文密钥
         retries = self.cfg.retries if retries is None else retries
         allow_media = self.cfg.fetch_media if allow_media is None else allow_media
         timeout = timeout or self.cfg.timeout
@@ -189,7 +234,9 @@ class HttpClient:
                         ct = (resp.headers.get("content-type", "")
                               .split(";")[0].strip().lower())
                         fr = FetchResponse(
-                            url=str(resp.url), status_code=resp.status_code,
+                            # URL 可能含 API Key(商业源), 元数据里脱敏后再留存
+                            url=redact_url(str(resp.url)),
+                            status_code=resp.status_code,
                             headers=dict(resp.headers), content_type=ct,
                             elapsed_ms=elapsed, retries=attempt - 1,
                             from_proxy=proxy or "",
@@ -200,7 +247,8 @@ class HttpClient:
                             fr.skip_reason = f"资源过滤: {ct or 'unknown'}"
                             # 直接 return: 流在 with 退出时关闭, 响应体
                             # 一个字节都不会被读取。
-                            log.debug("跳过媒体资源 %s (%s), 未读取响应体", url, ct)
+                            log.debug("跳过媒体资源 %s (%s), 未读取响应体",
+                                      safe_url, ct)
                             return fr
 
                         # 只读到上限; 达到上限立刻停止下载(不再白拉剩余字节)
@@ -208,7 +256,6 @@ class HttpClient:
                         # 在响应对象还活着时解析编码(httpx.Headers 大小写
                         # 不敏感; 转成普通 dict 后再查 content-type 可能漏)
                         enc = _detect_encoding(resp.headers, raw) or "utf-8"
-
                 try:
                     fr.text = raw.decode(enc, errors="replace")
                 except (LookupError, UnicodeDecodeError):
@@ -229,14 +276,18 @@ class HttpClient:
 
             except BlockedError as e:
                 last_err = e
-                log.warning("被拦截 %s (第 %d 次): %s", url, attempt, e)
+                log.warning("被拦截 %s (第 %d 次): %s", safe_url, attempt, e)
+                # 403 是明确的"禁止访问", 重试只会加深 IP 信誉惩罚, 且文档
+                # 承诺"4xx 不重试(429 除外)"。429/503 仍走退避重试。
+                if e.status_code == 403:
+                    raise
                 if attempt > retries:
                     break
                 self._sleep_backoff(attempt)
                 continue
             except (httpx.TimeoutException, httpx.ConnectTimeout) as e:
-                last_err = TimeoutError_(f"请求超时: {url} ({type(e).__name__})")
-                log.warning("超时 %s (第 %d 次)", url, attempt)
+                last_err = TimeoutError_(f"请求超时: {safe_url} ({type(e).__name__})")
+                log.warning("超时 %s (第 %d 次)", safe_url, attempt)
                 if attempt > retries:
                     break
                 self._sleep_backoff(attempt)
@@ -261,7 +312,7 @@ class HttpClient:
 
         if isinstance(last_err, IntelliSearchErrorBase):
             raise last_err
-        raise last_err or UpstreamError(f"请求失败: {url}", source=source)
+        raise last_err or UpstreamError(f"请求失败: {safe_url}", source=source)
 
     # ---------- 工具 ----------
     @staticmethod

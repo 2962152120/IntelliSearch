@@ -680,7 +680,10 @@ def get_pool(config: Config = None, max_pages: int = 4,
              headless: bool = True) -> BrowserPool:
     """进程级共享的浏览器池单例(避免重复启动浏览器进程)。"""
     cfg = config or DEFAULT_CONFIG
-    key = id(cfg)
+    # 用配置值而非 id(cfg) 做 key: 配置对象被 GC 后 id 可能被新对象复用,
+    # 导致拿到指向另一套配置的旧池。稳定 key 也便于测试复用同一实例。
+    key = (cfg.browser_path, cfg.render_headless, cfg.render_block_resources,
+           max_pages, headless)
     with BrowserPool._instances_lock:
         pool = BrowserPool._instances.get(key)
         if pool is None:

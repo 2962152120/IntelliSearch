@@ -24,7 +24,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..errors import IntelliSearchError, UpstreamError
+from ..errors import IntelliSearchError, UnsafeUrlError, UpstreamError
+from ..safety.urlcheck import validate_public_url
 from .ua import UAPool
 
 log = logging.getLogger("intellisearch.renderer")
@@ -506,6 +507,8 @@ class BrowserRenderer:
                      block_resources: Optional[bool] = None,
                      lang: str = "") -> RenderedPage:
         """真正的渲染实现。只允许在工作线程内调用。"""
+        # SSRF 防护: 渲染路径不经 HttpClient, 必须独立校验目标。
+        validate_public_url(url)
         nav_timeout = (timeout or self.nav_timeout) * 1000
         extra_wait = self.wait_ms if wait_ms is None else wait_ms
         # None 表示"沿用构造参数"(BrowserPool 恒传 True, 环境变量关掉拦截时
@@ -592,6 +595,8 @@ class BrowserRenderer:
                     raise
                 nav_error = str(nav_exc)[:200]
                 log.debug("导航返回错误状态码(%s), 校验是否为有效文档", nav_error[:80])
+            # 重定向可能把页面带到内网/元数据地址; 对最终 URL 复查。
+            validate_public_url(page.url)
             if wait_selector:
                 try:
                     page.wait_for_selector(wait_selector,
