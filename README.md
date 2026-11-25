@@ -3,6 +3,8 @@
 [![CI](https://github.com/2962152120/IntelliSearch/actions/workflows/ci.yml/badge.svg)](https://github.com/2962152120/IntelliSearch/actions/workflows/ci.yml)
 [![Integration](https://github.com/2962152120/IntelliSearch/actions/workflows/integration.yml/badge.svg)](https://github.com/2962152120/IntelliSearch/actions/workflows/integration.yml)
 
+> **语言 / Language**：**中文** | [English](README_EN.md)
+
 面向大模型的自研联网检索工具。输入关键词或自然语言问题，输出**可直接作为大模型上下文引用**的结构化检索结果。
 
 ```bash
@@ -217,6 +219,7 @@ rust async runtime -tokio → rust async runtime       （排除词生效）
 | 缓存 | SQLite，检索 30min、正文 2h，TTL + LRU |
 | 降级 | 单源失败 → PARTIAL；全源失败 → ERROR + 逐源原因 |
 | 无结果 | NO_RESULTS + 可操作建议（缩短查询词/放宽时间） |
+| **robots 合规** | 抓取与渲染前均过 `RobotsCache`；规则 URL 用纯 netloc 拼接（避免双重 scheme 被 SSRF 校验误拦而令规则失效），抓不到 robots.txt 时放行 |
 | **反爬软封** | 逐条过滤无关结果；整批全被过滤则整批丢弃，该源标 `irrelevant`（见 4.4） |
 
 ### 4.4 反爬软封防护：宁可无结果，不能给错引用
@@ -295,6 +298,7 @@ pip install playwright
 python scripts/install_browser.py          # 装 chromium（约 150MB，仅首次）
 python scripts/install_browser.py --check  # 只检查，不下载
 python scripts/install_browser.py --launch # 检查并真实启动一次内核
+python scripts/install_browser.py --force  # 已有也重装（升级内核版本时用）
 python scripts/install_browser.py --mirror # 官方 CDN 不通时改走 npmmirror
 ```
 
@@ -309,6 +313,13 @@ connection`，此时加 `--mirror` 直接走镜像即可）。
 - 内核版本与本环境 playwright 严格一致，不会出现"期望 chromium-1243 但只有
   chromium-1210"这类不匹配；
 - Docker 镜像同理自包含（见 `Dockerfile`）。
+
+> **playwright 1.5x 的 headless 内核改名**：新版把精简内核的可执行文件从
+> `headless_shell.exe` 改为 `chrome-headless-shell.exe`、目录从 `chrome-win64`
+> 改为 `chrome-headless-shell-win64`。安装脚本与运行时定位（`browser.py` 的
+> `_PKG_BROWSER_GLOBS`）**同时兼容新旧两种布局**——否则只装 headless 内核的
+> 精简部署会被误判为"无内置内核"而退回系统浏览器。`--check` 会同时列出完整
+> 内核与 headless 内核（实测 playwright 1.65.2 / chromium-1255 共约 219.7MB）。
 
 **发现顺序**（`http/browser.py: find_chromium`）：
 
@@ -408,6 +419,12 @@ f.fetch(url, mode="render")  # 强制渲染，即使 HTTP 已拿到内容也走�
 换台机器可能没装、或版本与 playwright 不兼容。包内那份随包分发，行为一致，
 "装完就能跑"才成立。系统浏览器降为兜底——本机没装内核时仍能跑，
 只是失去跨机器一致性。
+
+**包内扫描不依赖运行时环境变量**：`_package_browsers()` 直接扫
+`site-packages` 里的 `.local-browsers` 目录，与 `PLAYWRIGHT_BROWSERS_PATH`
+无关——playwright 自己的 `executable_path` 只有在运行时也设了该变量时才指向
+包目录，单靠它换台机器就找不着内核，"随包分发"就成了空话。目录里完整内核与
+headless 内核都以 `executable_path` 形式登记，新旧命名的 glob 全部覆盖。
 
 **为什么不直接用 `channel="chromium"`**：那样会走 playwright 的版本匹配，
 本机 playwright 1.63 期望 `chromium-1243`，而缓存里只有 `chromium-1210`，
@@ -518,7 +535,7 @@ docker-compose 的 `8787:8787` 端口映射才能从宿主机连通；若沿用�
 容器自包含 —— 换宿主或换基础镜像都不会因缺浏览器而退化成纯 HTTP。
 中文字体（`fonts-noto-cjk` / `fonts-wqy-zenhei`）必须保留，否则中文页渲染出豆腐块。
 
-### 5.3 三种调用方式
+### 5.3 四种调用方式
 
 **① Python API**
 
@@ -595,23 +612,26 @@ HTTP 状态码按检索状态映射：`ok` / `partial` / `no_results` → **200*
 
 ```bash
 python -m pytest tests/ -q                          # 离线
-python -m pytest tests/ -q --run-integration        # 追加 29 项真实网络/真实渲染
+python -m pytest tests/ -q --run-integration        # 追加真实网络/真实渲染用例（默认跳过）
 ```
 
-**实测结果（2026-11-13）：**
+**实测结果（2026-11-25）：**
 
 | 运行方式 | 结果 |
 |---|---|
-| `pytest tests/`（离线，本机） | **300 passed / 29 skipped**，72s |
-| `pytest tests/ --run-integration`（GitHub Actions：真实网络 + **包内 Chromium**） | **325 passed / 1 skipped / 3 xpassed**，0 failed，153s |
+| `pytest tests/`（离线，本机） | **336 passed / 29 skipped**，约 35s |
+| `pytest tests/test_renderer.py tests/test_render.py -q --run-integration`（渲染子集，真实内核） | **70 passed**，约 86s |
+| `pytest tests/ --run-integration`（GitHub Actions：真实网络 + **包内 Chromium**） | 0 failed；上游可用性探针按网络状况显示 xfail/xpass |
 
 > 跑测试时若看到"执行完了但没有 passed 统计行"，是环境的删除保护钩子拦了
 > `%TEMP%` 下的 pytest 临时目录清理；本项目已把 `--basetemp=.pytest-tmp`
 > 写进 `pyproject.toml` 的 `addopts`，正常执行即可拿到摘要。
 
 其中 xfail/xpass 的是上游可用性探针（`test_all_providers_reachable`、
-`test_real_search_chinese_yields_enough`、`test_real_search_english_yields_results`）：
-上游反爬或软封时它们显示 xfail（而不是让套件常红），上游恢复时显示 xpass。
+`test_real_search_chinese_yields_enough`、`test_real_search_english_yields_results`、
+`test_content_fetch_end_to_end`）：上游反爬或软封时它们显示 xfail（而不是让套件常红），
+上游恢复时显示 xpass。断言会附上逐条 `fetch_status`，便于从报告区分"无结果"与
+"结果被反爬/robots 拦截"。
 **同一批里正确性断言全部 pass** —— 状态合法、逐源有状态且失败有原因、
 交给调用方的每条结果都与查询相关。
 
@@ -630,9 +650,9 @@ python -m pytest tests/ -q --run-integration        # 追加 29 项真实网络/
 | `test_mcp_server.py` | **MCP 单次检索**：`format=context` 与 `json` 都只跑一次 `search`（回归：context 曾二次检索）、输出契约 |
 | `test_ratelimit.py` | 令牌桶、全局/会话/主机限流、黑名单、钓鱼站、付费墙标记 |
 | `test_regression_2026_10_06.py` | **假成功回归**：404/403/验证页不得判成功（`fetch` 与 `_fetch_contents` 两条路径）、失败不写缓存、失败分支 key 契约一致、Crawl-delay 生效且缓存命中不排队、导航容器不得压过正文、分词不得丢失实词、疑问词不产生伪词、垃圾批次逐条过滤 |
-| `test_robots.py` | Allow/Disallow 优先级、通配符与 `$` 锚定、agent 匹配、crawl-delay |
+| `test_robots.py` | Allow/Disallow 优先级、通配符与 `$` 锚定、agent 匹配、crawl-delay、**robots.txt 请求 URL 无双重 scheme（回归：曾拼出 `http://https://` 被 SSRF 拦下致规则从未生效）** |
 | `test_render.py` | 内核探测、引擎名、降级链判定、四种抓取模式、**`mode="render"` 在渲染禁用/内核缺失时显式 degraded**、**渲染返回 4xx/5xx 拦截页不采信（假成功回归）**、**`block_resources` 开关与 `lang`/locale 接线（本机站点请求留痕）**、真实 SPA 渲染、超时生效、并发渲染、干净降级 |
-| `test_browser_bundle.py` | **内置内核（11 项）**：包内内核优先级高于系统浏览器、显式路径最优先、缓存高于系统、完全无内核时降级为 `None` 不抛异常、候选去重、安装脚本存在且语法有效、`render` extra 已声明、**包目录扫描不依赖运行时环境变量**、`engine_detail` 在 `pool.info()` 与 `/render-info` 两处都带出内核绝对路径 |
+| `test_browser_bundle.py` | **内置内核（12 项）**：包内内核优先级高于系统浏览器、显式路径最优先、缓存高于系统、完全无内核时降级为 `None` 不抛异常、候选去重、安装脚本存在且语法有效、`render` extra 已声明、**包目录扫描不依赖运行时环境变量**、**内核 glob 同时匹配新旧 headless 布局（`chrome-headless-shell-win64` / 旧 `chrome-win64`）**、`engine_detail` 在 `pool.info()` 与 `/render-info` 两处都带出内核绝对路径 |
 | `test_renderer.py` | 候选发现与启动参数形状、`needs_render` 参数化、**密度判据按全文统计（骨架页必须判渲染 / 正文充足不得误判）**、**`RenderRequest.block_resources/lang` 透传与 `_locale_for` 映射**、`_looks_incomplete` 密度判据、接口契约、真实渲染与自动升级、资源拦截、并发 |
 | `test_relevance_guard.py` | **反爬软封闸门**：整批无关结果被丢弃、多实词需命中≥2 个、**URL 命中不能给内容命中凑数**、仅域名命中不算、单实词查询不误杀、查询词为空不误杀、被判不可用的源如实上报 |
 | `test_integration.py` | 真实中英文检索、多源管道完整性、软封时结果不外泄（`test_irrelevant_results_never_reach_caller`）、多源可用性（≥2 源，`xfail`）、站点/时效过滤、正文抓取、连续检索稳定性、无结果返回明确状态、超时生效 |
@@ -674,13 +694,20 @@ python -m pytest tests/ -q --run-integration        # 追加 29 项真实网络/
 `294 passed / 29 skipped`、Integration `319 passed / 1 skipped / 3 xpassed`，0 failed。
 再一轮收尾（HTTP 流式下载/媒体零字节跳过、compose Key 透传、文档漂移）：离线
 `300 passed / 29 skipped`、Integration `325 passed / 1 skipped / 3 xpassed`，0 failed。
+2026-11-22 的 Integration 因 `test_content_fetch_end_to_end`（真实网络正文抓取）
+在云主机出口 IP 被反爬而偶发失败，已将该上游可用性断言改为 `xfail(strict=False)`；
+此后离线随新增回归测试增至 `336 passed / 29 skipped`。同期还修复了两个潜伏问题：
+`robots.txt` 请求 URL 的双重 scheme（曾致 robots 规则从未真正生效）与内置内核在
+playwright 1.5x 改名后的检测/定位漏报。
 
 ---
 
 ## 7. 已知边界
 
-- **内置内核是体积换来的自包含**：解压后约 433MB（下载 195.6MB），装在
-  `site-packages` 内随虚拟环境/镜像分发。官方 CDN 在国内长传输易被掐断
+- **内置内核是体积换来的自包含**：实测 playwright 1.65.2 / chromium-1255 下
+  `--check` 报告约 219.7MB（完整 chrome.exe + headless shell 两个可执行文件；
+  下载含压缩包的总体积更大，Linux 镜像约 300MB），装在 `site-packages` 内随
+  虚拟环境/镜像分发。官方 CDN 在国内长传输易被掐断
   （`Download failed: server closed connection`），此时用
   `python scripts/install_browser.py --mirror` 走 npmmirror。**不装内核也能跑**，
   只是 JS 动态页面退回骨架页，且 `/render-info` 会如实报

@@ -8,6 +8,13 @@
 
 ## [未发布]
 
+### 文档
+
+- 新增英文版 `README_EN.md`，与中文 `README.md` 章节结构一一对应、顶部互加语言
+  切换链接；同步近期全部变更（robots 双重 scheme、playwright 1.5x headless 改名、
+  CI 测试加固、测试数字 336 passed 等）。顺带修正中文版 5.3 标题"三种调用方式"
+  实际列出四种的笔误。
+
 ### 修复
 
 - **运行时内置内核定位漏掉 headless shell**：`browser.py` 的 `_PKG_BROWSER_GLOBS`
