@@ -57,3 +57,24 @@ def test_missing_robots_allows_access():
 def test_offline_mode_allows():
     rc = RobotsCache(fetcher=None)
     assert rc.check("https://any.example/x")[0] is True
+
+
+def test_robots_url_has_single_scheme():
+    """回归: _host() 已带 scheme, _rules_for 不得再拼一次变成 http://https://。
+
+    双重前缀会被 SSRF 校验拦下, 导致生产环境永远抓不到 robots.txt(全部放行)。
+    现有测试都预填 _cache 绕过了 fetcher, 故此前未发现。
+    """
+    seen = []
+
+    class R:
+        status_code = 404
+        text = ""
+
+    rc = RobotsCache(fetcher=lambda u: (seen.append(u), R())[1])
+    assert rc.check("https://example.com/page")[0] is True
+    assert seen, "应实际请求过 robots.txt"
+    for u in seen:
+        assert u.count("://") == 1, f"URL 出现双重协议前缀: {u}"
+        assert u in ("https://example.com/robots.txt", "http://example.com/robots.txt")
+

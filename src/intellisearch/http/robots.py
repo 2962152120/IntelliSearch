@@ -106,9 +106,13 @@ class RobotsCache:
         if self._fetcher is None:  # 离线模式(测试): 全部放行
             self._cache[host] = (now, None)
             return None
+        # host 来自 _host(), 形如 "https://example.com"(带 scheme, 作为缓存键)。
+        # 这里必须剥掉原 scheme 只留 netloc, 否则拼出 "http://https://..."
+        # 双重前缀, 被 SSRF 校验拦下 -> 生产环境永远抓不到 robots.txt(全部放行)。
+        netloc = host.split("://", 1)[-1]
         for scheme in ("https", "http"):
             try:
-                resp = self._fetcher(f"{scheme}://{host}/robots.txt")
+                resp = self._fetcher(f"{scheme}://{netloc}/robots.txt")
                 if resp and resp.status_code == 200 and resp.text:
                     parsed = self._parse(resp.text)
                     self._cache[host] = (now, parsed)

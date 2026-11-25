@@ -10,6 +10,10 @@
 
 ### 修复
 
+- **robots.txt 在生产环境从未真正生效**：`_host()` 返回的 host 已带 scheme，
+  `_rules_for()` 又拼一次 `{scheme}://{host}`，生成 `http://https://...` 双重前缀，
+  被 SSRF 校验拦下后两个 scheme 均失败、规则一律放行。现剥掉原 scheme 只留
+  netloc 再拼；新增覆盖 fetcher URL 的回归测试（此前测试都预填缓存绕过了该路径）。
 - `scripts/install_browser.py` 的内核检测在 Windows 上漏认 headless 内核：
   playwright 1.5x 起其可执行文件从 `headless_shell.exe` 改为
   `chrome-headless-shell.exe`，旧名单导致 `--check` 只报告几 MB 的 chrome.exe、
