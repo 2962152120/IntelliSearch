@@ -129,12 +129,19 @@ def test_freshness_filter_end_to_end(engine):
     assert r.status in (Status.OK, Status.PARTIAL, Status.NO_RESULTS)
 
 
+@pytest.mark.xfail(strict=False,
+                reason="正文抓取依赖目标站点可达: CI/云主机出口 IP 常被搜索源"
+                       "或文章站反爬(200 拦截页/403)或 robots 拒绝, 属外部因素; "
+                       "检索链路本身正常, 只是拿不到正文, 与同文件其它上游可用性"
+                       "探针一样标为 xfail")
 def test_content_fetch_end_to_end(engine):
     r = engine.search("Python 列表推导式 教程", QueryOptions(
         top_k=2, fetch_content=True, max_content_chars=1500, timeout=25))
     assert r.status in (Status.OK, Status.PARTIAL)
     fetched = [x for x in r.results if x.clean_text]
-    assert fetched, "至少应抓到一篇正文"
+    # 带上逐条抓取状态, 夜间报告能直接看出是"没结果"还是"结果被反爬/robots 拦了"
+    detail = [(x.url, x.extra.get("fetch_status")) for x in r.results]
+    assert fetched, f"至少应抓到一篇正文; 实际抓取状态: {detail}"
     assert any(len(x.clean_text) > 100 for x in fetched)
 
 
