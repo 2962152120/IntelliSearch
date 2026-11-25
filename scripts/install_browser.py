@@ -47,12 +47,16 @@ BUNDLED_DIRNAME = ".local-browsers"
 # "Download failed: server closed connection"。
 MIRROR_HOST = "https://cdn.npmmirror.com/binaries/playwright"
 
-# 内核可执行文件名(按平台)
+# 内核可执行文件名(按平台)。
+# 注意 playwright 1.5x 起, headless shell 的 Windows 可执行文件名从
+# `headless_shell.exe` 改成了带连字符的 `chrome-headless-shell.exe`(chromium
+# 依旧是 `chrome.exe`)。只认旧名字会让 check() 漏掉 200MB+ 的 headless 内核,
+# 把"已就绪"误报成"只有几 MB"——加两个名字都认, 兼容新旧版本。
 _EXE_NAMES = {
-    "win32": ("chrome.exe", "headless_shell.exe"),
-    "darwin": ("chrome", "headless_shell", "Chromium"),
-    "linux": ("chrome", "headless_shell"),
-}.get(sys.platform, ("chrome", "headless_shell"))
+    "win32": ("chrome.exe", "chrome-headless-shell.exe", "headless_shell.exe"),
+    "darwin": ("chrome", "headless_shell", "chrome-headless-shell", "Chromium"),
+    "linux": ("chrome", "headless_shell", "chrome-headless-shell"),
+}.get(sys.platform, ("chrome", "headless_shell", "chrome-headless-shell"))
 
 
 def _env() -> dict:

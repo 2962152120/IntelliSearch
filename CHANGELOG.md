@@ -10,6 +10,10 @@
 
 ### 修复
 
+- `scripts/install_browser.py` 的内核检测在 Windows 上漏认 headless 内核：
+  playwright 1.5x 起其可执行文件从 `headless_shell.exe` 改为
+  `chrome-headless-shell.exe`，旧名单导致 `--check` 只报告几 MB 的 chrome.exe、
+  漏掉 200MB+ 的 headless shell。三个平台均补上带连字符的名字。
 - 夜间集成工作流的 `test_content_fetch_end_to_end` 偶发失败：该用例依赖真实网络，
   CI/云主机出口 IP 被搜索源或文章站反爬（200 拦截页 / 403）时会拿不到正文。
   与同文件其它上游可用性探针一致标记为 `xfail(strict=False)`——上游正常时仍执行
