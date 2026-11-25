@@ -178,10 +178,17 @@ _PKG_BROWSER_GLOBS = [
     "chromium-*/chrome-linux/chrome",
     "chromium-*/chrome-mac/Chromium.app/Contents/MacOS/Chromium",
     "chromium-*/chrome-mac-arm64/Chromium.app/Contents/MacOS/Chromium",
-    # 精简 headless 内核(体积更小, 也能用)
-    "chromium_headless_shell-*/chrome-win64/headless_shell.exe",
-    "chromium_headless_shell-*/chrome-linux/headless_shell",
-    "chromium_headless_shell-*/chrome-mac/headless_shell",
+    # 精简 headless 内核(体积更小, 也能用)。
+    # playwright 1.5x 起目录/文件名都改了: 目录从 chrome-win64 变成
+    # chrome-headless-shell-win64, 可执行文件从 headless_shell.exe 变成
+    # chrome-headless-shell.exe。新旧两种布局都列上, 兼容不同 playwright 版本。
+    "chromium_headless_shell-*/chrome-headless-shell-win64/chrome-headless-shell.exe",
+    "chromium_headless_shell-*/chrome-win64/chrome-headless-shell.exe",
+    "chromium_headless_shell-*/chrome-win64/headless_shell.exe",   # 旧布局
+    "chromium_headless_shell-*/chrome-linux/chrome-headless-shell",
+    "chromium_headless_shell-*/chrome-linux/headless_shell",      # 旧布局
+    "chromium_headless_shell-*/chrome-mac/chrome-headless-shell",
+    "chromium_headless_shell-*/chrome-mac/headless_shell",        # 旧布局
 ]
 
 

@@ -220,6 +220,43 @@ def test_engine_detail_is_exposed_for_troubleshooting():
         pool.close()
 
 
+def test_package_browsers_matches_new_headless_layout(tmp_path, monkeypatch):
+    """回归: playwright 1.5x 的 headless shell 目录/文件名都带连字符。
+
+    旧 glob 只认 chromium_headless_shell-*/chrome-win64/headless_shell.exe,
+    实际布局是 chromium_headless_shell-*/chrome-headless-shell-win64/
+    chrome-headless-shell.exe —— 漏掉后"只有 headless 内核"的精简部署会
+    被误判为无内置内核。用一个伪造的包目录验证两种布局都能被发现。
+    """
+    import types
+
+    # 伪造 site-packages/playwright/driver/package/.local-browsers 布局
+    pkg = tmp_path / "playwright"
+    pkg.mkdir()
+    mod = types.ModuleType("playwright")
+    mod.__file__ = str(pkg / "__init__.py")
+    lb = pkg / "driver" / "package" / ".local-browsers"
+    # 新布局(win)
+    new = lb / "chromium_headless_shell-1255" / "chrome-headless-shell-win64"
+    new.mkdir(parents=True)
+    (new / "chrome-headless-shell.exe").write_bytes(b"x")
+    # 新布局(linux)
+    newl = lb / "chromium_headless_shell-1255" / "chrome-linux"
+    newl.mkdir(parents=True)
+    (newl / "chrome-headless-shell").write_bytes(b"x")
+    # 旧布局(win)
+    old = lb / "chromium_headless_shell-1210" / "chrome-win64"
+    old.mkdir(parents=True)
+    (old / "headless_shell.exe").write_bytes(b"x")
+
+    monkeypatch.setitem(sys.modules, "playwright", mod)
+    found = B._package_browsers()
+    names = [os.path.basename(p) for p in found]
+    assert "chrome-headless-shell.exe" in names, f"漏掉新版 win headless: {found}"
+    assert "chrome-headless-shell" in names, f"漏掉新版 linux headless: {found}"
+    assert "headless_shell.exe" in names, f"漏掉旧版 win headless: {found}"
+
+
 def test_fetcher_info_exposes_engine_detail():
     """/render-info 落到 SmartFetcher.info(), 同样要有内核路径。"""
     from intellisearch.config import DEFAULT_CONFIG

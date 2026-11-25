@@ -10,6 +10,11 @@
 
 ### 修复
 
+- **运行时内置内核定位漏掉 headless shell**：`browser.py` 的 `_PKG_BROWSER_GLOBS`
+  沿用 playwright 1.4x 的旧路径/文件名（`chrome-win64/headless_shell.exe`），
+  而 1.5x 起实际是 `chrome-headless-shell-win64/chrome-headless-shell.exe`。
+  导致"只装 headless 内核"的精简部署被误判为无内置内核、退回系统浏览器。
+  新旧布局 glob 全部兼容；新增伪造包目录的回归测试。
 - **robots.txt 在生产环境从未真正生效**：`_host()` 返回的 host 已带 scheme，
   `_rules_for()` 又拼一次 `{scheme}://{host}`，生成 `http://https://...` 双重前缀，
   被 SSRF 校验拦下后两个 scheme 均失败、规则一律放行。现剥掉原 scheme 只留
