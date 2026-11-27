@@ -21,6 +21,23 @@
   25s 渲染的唤醒次数从 2500 次/线程降到 1 次。
 - 热路径正则预编译：`clean.summarize`、`rank` 事实关键词、`client._detect_encoding`。
 
+### 修复（渲染器生命周期）
+
+- **渲染池/渲染器 close 后不再可复活**：`BrowserPool.close()` 曾只把 `_renderer` 置空，
+  `available()` 又会重建渲染器 —— 在事件循环内嵌调用时，一个被"关闭"的渲染池可能
+  再被拉起，导致跨线程误关浏览器、共享 `_all` 互相误杀。现 `close` 是终止状态：
+  池与渲染器都设置 `_closed`，close 后所有入口（`available`/`render`/`render_sync`/
+  `_ensure_worker`）一律拒绝，需即建即丢。
+- **页签超时不再泄漏线程与页签槽**：事件循环内嵌下外层 `_render_in_worker` 的 join
+  超时与 `render_sync` 的页签 `acquire` 超时是两个独立预算，旧公式外层（timeout×3+15）
+  与 acquire（req.timeout×3+15 但根本没喂 req）倒挂时，外层已抛错，遥拉起的线程却
+  仍挂在 acquire 上并最终拿到许可真渲染 —— 每超时一次泄漏一个无法 kill 的 daemon
+  线程和一个页签槽（`max_pages=4` 时 4 次后渲染器永久排队）。现两处用同一公式且让
+  acquire 更先超时，线程在外层抛错后自行返回；外层 join 只兜"acquire 拿到但渲染卡死"。
+- **渲染器 close 超时不再跨线程清理**：worker 卡住 join 超时后，旧实现把 `_initialized`
+  置 False 并允许 `_ensure_worker` 拉起第二个线程共享 `_all` （跨线程 close）；
+  现标记 `_closed` 后不再复用，避免跨线程反模式与互相误杀。
+
 ### 修复
 
 - **`max_chars` 契约失效**：`compress` 用紧凑 JSON 测长度，而所有输出出口（engine /

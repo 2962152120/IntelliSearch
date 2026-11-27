@@ -416,6 +416,8 @@ Caller thread C ─┘                   (lazy start, long-lived, serial consump
 
 The cost is serial rendering in one thread. Measured: 3 pages serially in 53.4s (slowest single page 30s+). Since rendering is mostly I/O-bound waiting (network and JS both release the GIL), this is enough for single-fetch scenarios; for more concurrency, copy `_worker_loop` N times with one Playwright instance each.
 
+**Two hard lifecycle constraints (locked down in the 2026-11-27 fix):** `close` is **terminal**, not a "reset" — the renderer is bound to its worker thread, so reusing a closed instance always hits the cross-thread anti-pattern; pools and renderers therefore refuse to revive after close (`available()` stays False), and you should create a fresh `BrowserPool` instead. Also, when called from inside an event loop, the outer `join` timeout and the inner page-slot `acquire` timeout share the same formula (acquire fires first), guaranteeing that after the outer error the thread no longer eventually acquires a slot and actually renders — otherwise every timeout leaks one un-killable thread and one page slot.
+
 #### 4.5.5 Anti-bot and resource savings
 
 | Measure | Implementation |
@@ -567,7 +569,7 @@ python -m pytest tests/ -q --run-integration        # add real-network / real-re
 
 | Run | Result |
 |---|---|
-| `pytest tests/` (offline, local) | **348 passed / 29 skipped**, ~41s |
+| `pytest tests/` (offline, local) | **352 passed / 29 skipped**, ~60s |
 | `pytest tests/test_renderer.py tests/test_render.py -q --run-integration` (render subset, real kernel) | **70 passed**, ~86s |
 | `pytest tests/ --run-integration` (GitHub Actions: real network + bundled Chromium) | 0 failed; upstream-availability probes show xfail/xpass depending on network |
 

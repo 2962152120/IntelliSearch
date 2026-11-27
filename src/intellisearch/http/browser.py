@@ -482,6 +482,11 @@ class BrowserPool:
         self._sem = threading.Semaphore(self.max_pages)
         self._engine_name = ""
         self._init_error = ""
+        # 关闭 = 终止状态。close 只把 _renderer 置 None, 而 available() 在
+        # _init_error 为空时会再调 _ensure_renderer() **重建渲染器** —— 等于
+        # close 后可复活。渲染器内部是"单工作线程独占 Playwright", 关闭后复用
+        # 必踩跨线程/共享浏览器实例的反模式, 所以关闭一律不可逆。
+        self._closed = False
         self.stats = {"rendered": 0, "failed": 0, "timeouts": 0,
                       "blocked_requests": 0, "total_ms": 0}
 
@@ -515,6 +520,8 @@ class BrowserPool:
 
     def available(self) -> bool:
         """是否具备渲染能力(不真正启动浏览器, 成本极低)。"""
+        if self._closed:
+            return False
         if self._renderer is not None:
             return True
         if self._init_error:
@@ -573,6 +580,8 @@ class BrowserPool:
         """
         if not req.url or not req.url.startswith(("http://", "https://")):
             raise RenderError(f"URL 非法: {req.url!r}")
+        if self._closed:
+            raise RenderError("渲染池已关闭(终止状态)", source="browser_pool")
 
         if _in_event_loop():
             return self._render_in_worker(req)
@@ -591,10 +600,13 @@ class BrowserPool:
 
         t = threading.Thread(target=_run, name="is-render", daemon=True)
         t.start()
-        # 超时兜底: 渲染本身有内部超时, 这里再多等一会儿防线程卡死。
-        # 注意内部还有页签信号量 + 单工作线程两层排队, 排在后面的任务可能
-        # 等超过一个自身超时, 故预算放大到 3 倍(约等于 3 个页签轮完)。
-        budget = min((req.timeout or 25.0) * 3 + timeout_pad, 180.0)
+        # 外层兜底必须**小于**内部页签 acquire 预算(见 render_sync): 否则页签
+        # 全部被占后, acquire 比外层 join 先超时 → 外层已抛错, 但遥拉起的线程
+        # 仍挂在 acquire 上且最终拿到许可真去渲染 —— 每超时一次就泄漏一个
+        # 无法 kill 的 daemon 线程和一个页签槽。让 acquire 更先超时, 线程就能
+        # 在外层抛错后自行返回; 外层 join 只兜"acquire 拿到了但渲染卡死"的底。
+        acquire_budget = (req.timeout or 25.0) * 3 + 15.0
+        budget = min(acquire_budget * 2, timeout_pad + 180.0)
         t.join(timeout=budget)
         if "error" in box:
             raise box["error"]
@@ -606,11 +618,15 @@ class BrowserPool:
         """执行渲染。失败抛 RenderError(可降级)。"""
         if not req.url or not req.url.startswith(("http://", "https://")):
             raise RenderError(f"URL 非法: {req.url!r}")
+        if self._closed:
+            raise RenderError("渲染池已关闭(终止状态)", source="browser_pool")
         renderer = self._ensure_renderer()
 
         # 必须带超时: 若某个渲染任务卡死(页面阻塞/JS 死循环)且一直没有
         # 归还 permit, 无参 acquire() 会让第 N+1 个请求**永久阻塞** ——
         # 整个渲染器被楔死, 且无法降级。宁可超时抛错让上层降级。
+        # 与 _render_in_worker 的外层预算用**同一公式**, 保证 acquire 比外层
+        # join 先超时 —— 否则外层已抛错线程却仍挂在这里最终拿到许可真渲染。
         budget = (req.timeout or 25.0) * 3 + 15.0
         if not self._sem.acquire(timeout=budget):
             raise RenderError(f"等待渲染页签超时({budget:.0f}s, 上限 "
@@ -663,6 +679,7 @@ class BrowserPool:
 
     def close(self, timeout: float = 15.0) -> None:
         with self._renderer_lock:
+            self._closed = True      # 终止状态, 先于关 renderer, 阻断并发 render
             if self._renderer is not None:
                 r, self._renderer = self._renderer, None
                 try:

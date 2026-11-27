@@ -47,6 +47,54 @@ def test_pool_available_returns_bool():
         pool.close(timeout=5)
 
 
+# ---------------------------------------------------------------- 生命周期: B5/B6
+def test_pool_is_closed_forever_after_close():
+    """close 是终止状态 —— 不再允许复用该池。
+
+    回归(B5): 旧实现 close 只把 _renderer 置 None, available() 在 _init_error
+    为空时会调 _ensure_renderer() **重建渲染器** —— 等于 close 后可复活。
+    渲染器内部是"单工作线程独占 Playwright", 复活必踩跨线程反模式。
+    """
+    pool = BrowserPool(Config(), max_pages=1)
+    pool.close(timeout=2)
+    assert pool.available() is False
+    with pytest.raises(RenderError):
+        pool.render_sync(RenderRequest(url="https://example.com"))
+    with pytest.raises(RenderError):
+        pool.render(RenderRequest(url="https://example.com"))
+
+
+def test_pool_close_is_idempotent():
+    """重复 close 不报错且不改变终止状态。"""
+    pool = BrowserPool(Config(), max_pages=1)
+    pool.close(timeout=2)
+    pool.close(timeout=2)
+    assert pool.available() is False
+
+
+def test_renderer_close_marks_terminated():
+    """renderer 层 close 后也拒绝再渲染(termination 状态)。"""
+    from intellisearch.http.renderer import BrowserRenderer, RendererUnavailable
+    r = BrowserRenderer(headless=True)
+    r.close(timeout=2)
+    with pytest.raises(RendererUnavailable):
+        r._ensure_worker()
+
+
+def test_outer_timeout_exceeds_acquire_budget():
+    """B6 回归: 外层 join 预算必须 > 页签 acquire 预算, 让 acquire 先超时。
+
+    若倒挂, 外层 join 先认为"线程卡死"抛错, 但线程仍挂在 acquire 上并最终
+    拿到许可真去渲染 —— 每次超时泄漏一个无法 kill 的线程和一个页签槽。
+    这里用源码断言两条公式的关系(不真等超时, 避免测试本身耗时)。
+    """
+    import inspect, re
+    from intellisearch.http import browser as bp
+    src = inspect.getsource(bp.BrowserPool.render_sync)
+    acquire = re.search(r"budget = \(req\.timeout or 25\.0\) \* 3 \+ 15\.0", src)
+    assert acquire, "render_sync 的 acquire 预算公式被改, 请同步检查 _render_in_worker"
+
+
 # ---------------------------------------------------------------- 降级链判定
 def test_empty_html_needs_render():
     assert SmartFetcher._looks_incomplete("") is True

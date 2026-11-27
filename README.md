@@ -457,6 +457,8 @@ Playwright 的**同步 API 绑定创建它的线程**。最初按常规写法做
 
 代价是渲染在单线程内串行。实测 3 个页面串行 53.4s（其中单页最慢 30s+）。因为页面渲染以 I/O 等待为主（网络 + JS 执行均释放 GIL），对单次抓取场景够用；确需更高并发时，把 `_worker_loop` 复制 N 份、每份一套 Playwright 即可。
 
+**生命周期的两个硬约束（2026-11-27 修复固化）：** `close` 是**终止状态**而非"重置"——渲染器绑定工作线程，复用一个关闭过的实例必踩跨线程反模式；因此池与渲染器都拒绝在 close 后复活，`available()` 恒 False，需要时应新建 `BrowserPool`。此外事件循环内嵌调用时，外层 join 超时与内部页签 `acquire` 超时用**同源公式**（acquire 先行），保证"外层抛错后线程不再最终拿到许可渲染"——否则每超时一次就泄漏一个无法 kill 的线程和一个页签槽。
+
 #### 4.5.5 反爬与资源节省
 
 | 手段 | 实现 |
@@ -619,7 +621,7 @@ python -m pytest tests/ -q --run-integration        # 追加真实网络/真实�
 
 | 运行方式 | 结果 |
 |---|---|
-| `pytest tests/`（离线，本机） | **348 passed / 29 skipped**，约 41s |
+| `pytest tests/`（离线，本机） | **352 passed / 29 skipped**，约 60s |
 | `pytest tests/test_renderer.py tests/test_render.py -q --run-integration`（渲染子集，真实内核） | **70 passed**，约 86s |
 | `pytest tests/ --run-integration`（GitHub Actions：真实网络 + **包内 Chromium**） | 0 failed；上游可用性探针按网络状况显示 xfail/xpass |
 

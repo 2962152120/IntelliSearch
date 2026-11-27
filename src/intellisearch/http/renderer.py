@@ -209,6 +209,13 @@ class BrowserRenderer:
         self._queue: "queue.Queue" = queue.Queue()
         self._worker: Optional[threading.Thread] = None
         self._stopping = False
+        # 关闭 = 终止状态: close() 后不再允许复用。此前 close 仅停工作线程,
+        # 若线程卡在页面上 join 超时, 后续 render() 会拉起**第二个**工作线程
+        # 并用跨线程的 _shutdown_playwright 关掉旧线程的 browser —— 正是本模块
+        # 要避免的跨线程反模式, 且共享 _all 会互相误杀。因此关闭后一律拒绝复用,
+        # 由 BrowserPool 丢弃整个实例、新建一个干净的。这也使得"世代隔离"成为多余:
+        # 复用被禁止了, 新旧工作线程不可能共存, _all 只可能属于一个 worker。
+        self._closed = False
         # 等待预算上限(秒): 队列深度会放大预算, 但设顶防止真正卡死时无限等
         self.queue_budget_cap = float(os.getenv("IS_RENDER_QUEUE_BUDGET", "180"))
 
@@ -278,6 +285,8 @@ class BrowserRenderer:
     def _ensure_worker(self) -> None:
         """启动专用工作线程。渲染任务全部投递到这里执行。"""
         with self._lock:
+            if self._closed:
+                raise RendererUnavailable("渲染器已关闭(终止状态, 不可复用)")
             if self._worker is not None and self._worker.is_alive():
                 return
             # 丢弃上一轮 close() 可能残留的 None 哨兵。
@@ -447,6 +456,7 @@ class BrowserRenderer:
         那正是本模块要避免的跨线程反模式。
         """
         with self._lock:
+            self._closed = True          # 终止状态: 之后的 render/submit 一律拒绝
             worker = self._worker
             self._worker = None
             self._stopping = True
@@ -454,14 +464,15 @@ class BrowserRenderer:
             self._queue.put(None)
             worker.join(timeout=timeout)
             if worker.is_alive():
-                # 线程仍卡住: 交由它自己的 finally 清理, 调用方不越权。
-                # 同时把残留哨兵清掉, 保证后续 render() 能拉起新线程。
-                log.warning("渲染工作线程 %s 秒内未退出, 跳过跨线程清理",
+                # 线程仍卡在某个页面上, 它的 finally 会在自然退出后自行清理。
+                # 这里绝不能: a) 跨线程调 _shutdown_playwright(违反线程绑定);
+                # b) 再拉起新工作线程(会共享 _all 互相误杀 browser)。本实例已
+                # 在开头标记 _closed, 视为"僵死但干净", 由 BrowserPool 整体丢弃。
+                log.warning("渲染工作线程 %s 秒内未退出, 实例已标记关闭, 不再复用",
                             timeout)
-                self._drain_sentinels()
-                self._initialized = False
                 return
-        # 线程已确认退出(或从未启动): 兜底清理是安全的
+        # 线程已确认退出(或从未启动): 它的 finally 已在本线程内清理, 这里
+        # 再做一次兜底是幂等安全的(_shutdown_playwright 清空列表后无副作用)。
         self._shutdown_playwright()
         self._initialized = False
         self._drain_sentinels()
