@@ -567,7 +567,7 @@ python -m pytest tests/ -q --run-integration        # add real-network / real-re
 
 | Run | Result |
 |---|---|
-| `pytest tests/` (offline, local) | **336 passed / 29 skipped**, ~35s |
+| `pytest tests/` (offline, local) | **348 passed / 29 skipped**, ~41s |
 | `pytest tests/test_renderer.py tests/test_render.py -q --run-integration` (render subset, real kernel) | **70 passed**, ~86s |
 | `pytest tests/ --run-integration` (GitHub Actions: real network + bundled Chromium) | 0 failed; upstream-availability probes show xfail/xpass depending on network |
 
@@ -627,6 +627,7 @@ Key verification conclusions:
 Integration regression is deliberately **not** attached to push: it depends on external sites, is slow, and has upstream volatility — unsuitable as a per-commit gate. The first CI run had all three legs at `253 passed / 27 skipped` (also confirming `requires-python >= 3.9`) and exposed and fixed a real bug on the spot — under the en-US/cp1252 code page `isearch --help` crashed with `UnicodeEncodeError` printing Chinese (regression in `tests/test_cli.py`).
 A 2026-11-13 CI run had all three legs at `289 passed / 29 skipped`; the same day's manual full Integration (real network + real Chromium) was `314 passed / 1 skipped / 3 xpassed`, 0 failed. After three P2 fixes (paywall down-ranking / fact-keyword truncation / relevance-evidence scope): offline `294 passed / 29 skipped`, Integration `319 passed / 1 skipped / 3 xpassed`, 0 failed. Another wrap-up round (HTTP streaming / zero-byte media skip, compose key passthrough, doc drift): offline `300 passed / 29 skipped`, Integration `325 passed / 1 skipped / 3 xpassed`, 0 failed.
 The 2026-11-22 Integration saw a one-off failure of `test_content_fetch_end_to_end` (real-network body fetching) when the CI egress IP was anti-bot blocked; that upstream-availability assertion was changed to `xfail(strict=False)`. Offline then grew to `336 passed / 29 skipped` with new regression tests. Two latent issues were also fixed in the same period: the double scheme in robots.txt request URLs (which had kept robots rules from ever taking effect), and bundled-kernel detection/discovery misses after the playwright 1.5x rename.
+The 2026-11-27 performance and correctness pass changed `compress` from re-serializing the whole payload per removed result (O(n²)) to a binary search (O(log n)), and made `max_chars` measure against the actual `indent=2` output; the paywall penalty is no longer applied twice; `site` filtering now uses hostname suffix matching; consecutive `User-agent` lines in robots.txt correctly share rules; title dedupe gained length bucketing, robots fetching became single-flight, and render waiting switched to an Event. Offline tests grew to `348 passed / 29 skipped`.
 
 ---
 

@@ -17,6 +17,24 @@ from ..extract.clean import domain_of, is_spam, root_domain
 from ..models import Freshness, QueryOptions, SearchResult, SourceType, now_utc
 
 # 类型权重(可信度微调)
+# 事实关键词判定(含 ASCII 字母且有数字), 预编译避免 term×result 反复编译
+_ASCII_RE = re.compile(r"[a-z]", re.I)
+_DIGIT_RE = re.compile(r"\d")
+
+
+def _host_matches(host: str, want: str) -> bool:
+    """hostname 精确或子域后缀匹配(去掉端口与尾点)。
+
+    ``want`` 为站点限定词, ``host`` 为待判定的域名。用子串会让
+    ``site=github.com`` 放行 ``evilgithub.com``、让排除规则误杀 ``notbaidu.com``。
+    """
+    h = (host or "").lower().rstrip(".")
+    if ":" in h:                       # netloc 可能带端口
+        h = h.rsplit(":", 1)[0]
+    w = (want or "").lower().strip().lstrip(".").rstrip(".")
+    return bool(w and (h == w or h.endswith("." + w)))
+
+
 TYPE_CRED_ADJUST = {
     SourceType.DOC: 0.10,
     SourceType.WIKI: 0.05,
@@ -78,7 +96,7 @@ def score_relevance(r: SearchResult, terms: Sequence[str],
             base += 0.08
     # 型号类 token(含数字+字母)命中标题, 额外加权
     for t in terms:
-        if re.search(r"[a-z]", str(t), re.I) and re.search(r"\d", str(t)) and \
+        if _ASCII_RE.search(str(t)) and _DIGIT_RE.search(str(t)) and \
                 str(t).lower() in title:
             base += 0.08
     return max(0.0, min(1.0, base))
@@ -136,11 +154,8 @@ def rank(results: List[SearchResult], terms: Sequence[str],
         rel = score_relevance(r, terms, full_query)
         fresh = score_freshness(r)
         cred = credibility_of(r, cfg)
-        # 付费墙降权: SafetyGuard 标记 extra["_penalty"](如 0.85), 此前
-        # 只标记不生效; 这里真正应用到可信度维度, 付费墙结果仍保留但靠后。
-        penalty = r.extra.get("_penalty", 1.0)
-        if isinstance(penalty, (int, float)) and 0 < penalty <= 1:
-            cred = cred * penalty
+        # 付费墙降权统一在下方 total 上施加(只施加一次), 不要在这里再乘一遍 ——
+        # 否则可信度分量承受 penalty²(0.85→0.7225), 远超设计的 15% 降权。
         leng = score_length(r)
         # 时效性权重在有明确时间需求时提高
         w_f = cfg.w_freshness
@@ -219,12 +234,15 @@ def filter_results(results: Iterable[SearchResult], options: QueryOptions,
         root = root_domain(dom)
         if options.site:
             want = options.site.lower().lstrip(".")
-            if want not in dom and want not in root:
+            # hostname 精确/后缀匹配: 不能用子串, 否则 site="github.com"
+            # 会放行 evilgithub.com, exclude 会误杀 notbaidu.com。
+            if not _host_matches(dom, want) and not _host_matches(root, want):
                 stats["site"] += 1
                 continue
         if options.exclude_sites:
             blocked = [s.lower().lstrip(".") for s in options.exclude_sites]
-            if any(b and (b in dom or b == root) for b in blocked):
+            if any(b and (_host_matches(dom, b) or _host_matches(root, b))
+                   for b in blocked):
                 stats["site"] += 1
                 continue
         if time_from or time_to:

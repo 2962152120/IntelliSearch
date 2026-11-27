@@ -12,6 +12,11 @@ from urllib.parse import urlparse
 from ..models import SourceType, parse_time
 from .dom import normalize_text
 
+# 高信息句特征(数字/单位/结论词), 供 extractive summarize 预编译复用
+_KEY_SENTENCE_RE = re.compile(
+    r"\d|%|TOPS|GHz|GB|TB|元|美元|发布|表示|支持|采用|参数|规格|"
+    r"结论|因此|综上|官方|评测|测试")
+
 # 摘要中常见的日期前缀: "2026年9月24日 · ..." / "2026-09-24 - ..."
 _DATE_PREFIX_RE = re.compile(
     r"^\s*(\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?"
@@ -186,13 +191,11 @@ def summarize(text: str, max_chars: int = 300) -> str:
     head = sentences[0]
     picked = [head]
     used = len(head)
-    # 高信息句: 含数字/单位/结论词
-    key_re = re.compile(r"\d|%|TOPS|GHz|GB|TB|元|美元|发布|表示|支持|采用|参数|规格|"
-                        r"结论|因此|综上|官方|评测|测试")
+    # 高信息句: 含数字/单位/结论词(预编译, 避免每条结果 summarize 都重编译)
     for s in sentences[1:]:
         if used >= max_chars:
             break
-        if key_re.search(s) and len(s) >= 10:
+        if _KEY_SENTENCE_RE.search(s) and len(s) >= 10:
             if used + len(s) + 1 > max_chars:
                 break
             picked.append(s)

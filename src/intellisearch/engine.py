@@ -236,8 +236,12 @@ class SearchEngine:
         resp = self.search(query, options, **overrides)
         if not resp.results:
             return f"# 检索结果\n未找到相关内容（状态: {resp.status.value}）。{resp.message}"
+        # with_content 要看合并 overrides 后的实际选项: 调用方可能通过
+        # search_context(..., fetch_content=True) 传入, 之前只看 options 会
+        # 抓了正文却在渲染时静默丢弃。
+        opts = self._merge_options(options, overrides)
         text = build_context(resp.results, max_chars=max_chars,
-                             with_content=bool(options and options.fetch_content))
+                             with_content=bool(opts.fetch_content))
         if resp.conflicts:
             text += "\n\n⚠️ 信息差异:\n" + "\n".join(
                 f"- {c['message']}" for c in resp.conflicts)

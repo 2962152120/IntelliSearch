@@ -619,7 +619,7 @@ python -m pytest tests/ -q --run-integration        # 追加真实网络/真实�
 
 | 运行方式 | 结果 |
 |---|---|
-| `pytest tests/`（离线，本机） | **336 passed / 29 skipped**，约 35s |
+| `pytest tests/`（离线，本机） | **348 passed / 29 skipped**，约 41s |
 | `pytest tests/test_renderer.py tests/test_render.py -q --run-integration`（渲染子集，真实内核） | **70 passed**，约 86s |
 | `pytest tests/ --run-integration`（GitHub Actions：真实网络 + **包内 Chromium**） | 0 failed；上游可用性探针按网络状况显示 xfail/xpass |
 
@@ -699,6 +699,11 @@ python -m pytest tests/ -q --run-integration        # 追加真实网络/真实�
 此后离线随新增回归测试增至 `336 passed / 29 skipped`。同期还修复了两个潜伏问题：
 `robots.txt` 请求 URL 的双重 scheme（曾致 robots 规则从未真正生效）与内置内核在
 playwright 1.5x 改名后的检测/定位漏报。
+2026-11-27 的性能与正确性优化：`compress` 裁剪从逐条全量序列化（O(n²)）改为二分
+定位（O(log n)），并让 `max_chars` 按实际 `indent=2` 输出口径计量；付费墙 penalty
+不再双重施加；`site` 过滤改 hostname 后缀匹配；robots 连续 `User-agent` 行正确共享
+规则；标题去重加长度分桶、robots 抓取 single-flight、渲染等待改 Event。离线测试
+增至 `348 passed / 29 skipped`。
 
 ---
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from difflib import SequenceMatcher
@@ -246,15 +247,23 @@ def _status_of(e: IntelliSearchError) -> str:
 # --------------------------------------------------------------------------
 # 去重
 # --------------------------------------------------------------------------
+# 预编译: 旧实现每次 _title_key 调用都 import re + re.sub, 在去重内层循环里
+# 被反复执行(80 条结果约 6300 次)。提到模块级只编译一次。
+_TITLE_KEY_RE = re.compile(r"[\s\-_|,，。、:：·•\"'《》\[\]()（）]+")
+
+
 def _title_key(t: str) -> str:
-    import re
-    return re.sub(r"[\s\-_|,，。、:：·•\"'《》\[\]()（）]+", "", (t or "").lower())
+    return _TITLE_KEY_RE.sub("", (t or "").lower())
 
 
 def dedupe(results: Sequence[SearchResult]) -> List[SearchResult]:
     """URL 归一化去重 + 标题相似度去重, 并做字段合并补全。"""
     merged: Dict[str, SearchResult] = {}
     order: List[str] = []
+    # 每个已合并项的 title key 只算一次并缓存, 供后续相似度比较复用;
+    # 按标题长度分桶, 长度差过大的标题不可能达到相似度阈值, 跳过比较。
+    title_keys: Dict[str, str] = {}
+    buckets: Dict[int, List[str]] = {}
 
     for r in results:
         if needs_resolve(r.url):
@@ -268,8 +277,13 @@ def dedupe(results: Sequence[SearchResult]) -> List[SearchResult]:
         dup_key = None
         tk = _title_key(r.title)
         if tk:
-            for key, exist in merged.items():
-                ek = _title_key(exist.title)
+            # 相似标题长度接近: 只在长度 ±30% 的桶里找候选
+            lo, hi = int(len(tk) * 0.7), int(len(tk) * 1.3)
+            candidates = set()
+            for ln in range(lo, hi + 1):
+                candidates.update(buckets.get(ln, ()))
+            for key in candidates:
+                ek = title_keys.get(key, "")
                 if not ek:
                     continue
                 if tk == ek or (min(len(tk), len(ek)) >= 6 and
@@ -282,6 +296,9 @@ def dedupe(results: Sequence[SearchResult]) -> List[SearchResult]:
         else:
             merged[fp] = r
             order.append(fp)
+            if tk:
+                title_keys[fp] = tk
+                buckets.setdefault(len(tk), []).append(fp)
 
     for r in merged.values():
         r.extra["source_count"] = len(r.extra.get("sources", [r.source]) or [r.source])

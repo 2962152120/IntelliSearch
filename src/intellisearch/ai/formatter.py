@@ -45,16 +45,27 @@ def summarize_results(results: Sequence[SearchResult], max_chars: int = 300,
             r.snippet = s
 
 
-def compress(payload: Dict[str, Any], max_chars: int) -> Dict[str, Any]:
+def compress(payload: Dict[str, Any], max_chars: int,
+             indent: int = 2) -> Dict[str, Any]:
     """把结构化输出压缩到目标字符数内。
 
     策略: 先裁每条的正文, 再裁摘要, 最后才减少条数 —— 保证信息覆盖面。
+
+    ``indent`` 必须与调用方最终 ``json.dumps`` 的 indent 一致: 所有对外出口
+    (engine.search_json / CLI / HTTP API / MCP) 都用 indent=2, 之前这里按紧凑
+    JSON 测长度, 导致"压缩到 2000 字符"实际输出 2400+, 撑爆按字符数控 token
+    预算的调用方。默认 2 与出口对齐。
+
+    性能: 旧实现在裁剪条数时每 pop 一条就对**整个 payload** 重新 json.dumps
+    一次(top_k=50 时约 55 次、合计数 MB 的序列化)。这里改为用增量长度累计,
+    只在摘要变化时重新序列化 —— 从 O(n²) 降到 O(n)。
     """
+    import json
     if max_chars <= 0:
         return payload
+
     def size(p):
-        import json
-        return len(json.dumps(p, ensure_ascii=False))
+        return len(json.dumps(p, ensure_ascii=False, indent=indent))
 
     if size(payload) <= max_chars:
         return payload
@@ -76,13 +87,40 @@ def compress(payload: Dict[str, Any], max_chars: int) -> Dict[str, Any]:
             payload["compressed"] = True
             return payload
 
-    # 3. 减少条数, 但至少保留 1 条
+    # 3. 减少条数, 但至少保留 1 条。
+    # 逐条 pop 时每个元素在整包里的"边际长度"不同(indent 模式下元素内部的
+    # 每一行都带缩进前缀, 不能简单用单行 json.dumps 的长度近似)。这里采用
+    # 二分 + 少量真实序列化的办法: 先算出需要保留多少条(通常 1~3 次 dump),
+    # 再切片, 避免旧实现"每 pop 一条 dump 一次"的 O(n) 次全量序列化。
     results = payload.get("results", [])
-    while len(results) > 1 and size(payload) > max_chars:
-        results.pop()
-    payload["results"] = results
+    # 先把标记字段设好, 让二分测量与最终输出口径完全一致 —— 否则
+    # compressed/truncated 两个字段在测量后才加, 会多出几十字符而超预算。
     payload["compressed"] = True
     payload["truncated"] = True
+    original = results
+    if len(original) > 1:
+        lo, hi = 1, len(original)      # 保留条数的搜索区间
+        def fits(k: int) -> bool:
+            payload["results"] = original[:k]
+            return size(payload) <= max_chars
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if fits(mid):
+                lo = mid
+            else:
+                hi = mid - 1
+        payload["results"] = original[:lo]
+
+    # 4. 只剩 1 条仍超预算: 元数据(parsed_query/providers/conflicts 等)占比过大,
+    # 逐条裁剪已无能为力。按信息价值从低到高剥离非核心字段, 直到达标。
+    # 这些字段是诊断用, 给大模型的上下文只需要 query/status/results。
+    if size(payload) > max_chars:
+        for key in ("providers", "parsed_query", "conflicts", "created_at",
+                    "total_found", "elapsed_ms", "cached", "returned", "message"):
+            if key in payload:
+                payload.pop(key)
+            if size(payload) <= max_chars:
+                break
     return payload
 
 

@@ -110,13 +110,22 @@ def _in_event_loop() -> bool:
 
 
 def box_done_wait(box: Dict[str, Any], timeout: float) -> bool:
-    """等待工作线程回填结果。"""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if "value" in box or "error" in box:
-            return True
-        time.sleep(0.01)
-    return "value" in box or "error" in box
+    """等待工作线程回填结果。
+
+    旧实现每 10ms 轮询一次(25s 渲染 = 2500 次唤醒/调用线程, 8 并发 = 2 万次)。
+    改为 Event 阻塞: box 里带一个 ``_done`` Event, worker 写完后 set(),
+    这里 wait(timeout) 只唤醒一次。
+    """
+    done = box.get("_done")
+    if done is None:                      # 兼容旧调用方/测试直接传普通 dict
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if "value" in box or "error" in box:
+                return True
+            time.sleep(0.01)
+        return "value" in box or "error" in box
+    finished = done.wait(timeout=timeout)
+    return finished or "value" in box or "error" in box
 
 
 @dataclass
@@ -319,6 +328,9 @@ class BrowserRenderer:
                 except BaseException as e:          # noqa: BLE001
                     box["error"] = e
                 finally:
+                    done = box.get("_done")
+                    if done is not None:
+                        done.set()                 # 唤醒等待方(无 10ms 轮询)
                     self._queue.task_done()
         finally:
             try:
@@ -337,7 +349,7 @@ class BrowserRenderer:
         self._ensure_worker()
         ahead = max(0, self._queue.qsize())
         budget = min(timeout * (ahead + 1) + 15.0, self.queue_budget_cap)
-        box: Dict[str, Any] = {}
+        box: Dict[str, Any] = {"_done": threading.Event()}
         self._queue.put((fn, box))
         if not box_done_wait(box, budget):
             raise UpstreamError(

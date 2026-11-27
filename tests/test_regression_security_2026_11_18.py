@@ -122,7 +122,11 @@ def test_paywall_penalty_affects_rank():
     pay = mk("AMD Zen5 解析", "https://b.com/1", "AMD Zen5 架构")
     pay.extra["_penalty"] = 0.85
     rank([clean, pay], ["AMD", "Zen5", "架构"], "AMD Zen5 架构")
-    assert clean.credibility > pay.credibility
+    # penalty 只在综合得分上施加一次(约 15% 降权)。此前 credibility 与 total
+    # 各乘一次, 使可信度分量承受 0.85²=0.7225 —— 远超设计的降权幅度。
+    # 断言综合得分而非 credibility: 后者不该被二次惩罚。
+    assert clean.extra["_score"] > pay.extra["_score"]
+    assert clean.credibility == pay.credibility, "credibility 不应被重复降权"
 
 
 # ------------------------------------------------------------------ 状态

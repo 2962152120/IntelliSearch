@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import threading
 import time
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
@@ -72,10 +73,33 @@ class RobotsCache:
         self._ttl = ttl
         self._ua = user_agent.lower()
         self._cache: Dict[str, Tuple[float, Optional[Dict[str, RobotsRule]]]] = {}
+        # 并发保护: _fetch_contents 用 6 线程并发, 同一 host 的多条结果若同时
+        # 穿过"检查未命中→抓取"窗口, 会各自发一次 robots.txt 请求(惊群)。
+        # 用锁 + per-host Event 实现 single-flight: 一个线程抓, 其余等结果。
+        self._lock = threading.Lock()
+        self._inflight: Dict[str, threading.Event] = {}
 
     def _parse(self, text: str) -> Dict[str, RobotsRule]:
         rules: Dict[str, RobotsRule] = {}
         current: List[str] = []
+        # 标准 robots.txt 允许连续多行 User-agent 共享其后的一组规则:
+        #   User-agent: *
+        #   User-agent: MyBot
+        #   Disallow: /private      ← 同时作用于 * 与 MyBot
+        # 旧实现每遇一行 User-agent 就把 current 覆盖为单元素, 导致 * 组丢失,
+        # 未命名爬虫因此绕过本应禁止的路径。用 pending 累积连续声明, 遇到
+        # 第一条非 user-agent 指令时才把规则落到所有声明的 agent。
+        pending: List[str] = []
+        agents: List[str] = []
+
+        def commit_pending():
+            nonlocal pending, agents
+            if pending:
+                agents = pending
+                pending = []
+                for name in agents:
+                    rules.setdefault(name, RobotsRule())
+
         for raw in text.splitlines():
             line = raw.split("#", 1)[0].strip()
             if not line or ":" not in line:
@@ -83,16 +107,16 @@ class RobotsCache:
             k, v = line.split(":", 1)
             k, v = k.strip().lower(), v.strip()
             if k == "user-agent":
-                current = [v.lower()]
-                for name in current:
-                    rules.setdefault(name, RobotsRule())
-            elif k in ("allow", "disallow") and current:
-                for name in current:
+                pending.append(v.lower())
+                continue
+            commit_pending()
+            if k in ("allow", "disallow") and agents:
+                for name in agents:
                     r = rules.setdefault(name, RobotsRule())
                     (r.allow if k == "allow" else r.disallow).append(v)
-            elif k == "crawl-delay" and current:
+            elif k == "crawl-delay" and agents:
                 try:
-                    for name in current:
+                    for name in agents:
                         rules.setdefault(name, RobotsRule()).crawl_delay = float(v)
                 except ValueError:
                     pass
@@ -100,12 +124,40 @@ class RobotsCache:
 
     def _rules_for(self, host: str) -> Optional[Dict[str, RobotsRule]]:
         now = time.time()
-        hit = self._cache.get(host)
-        if hit and now - hit[0] < self._ttl:
-            return hit[1]
-        if self._fetcher is None:  # 离线模式(测试): 全部放行
-            self._cache[host] = (now, None)
-            return None
+        # 快路径: 缓存命中直接返回(加锁读, 避免与写入竞争)
+        with self._lock:
+            hit = self._cache.get(host)
+            if hit and now - hit[0] < self._ttl:
+                return hit[1]
+            if self._fetcher is None:      # 离线模式(测试): 全部放行
+                self._cache[host] = (now, None)
+                return None
+            # single-flight: 若该 host 已有线程在抓, 拿到它的 Event 后释放锁并等待
+            inflight = self._inflight.get(host)
+            if inflight is None:
+                inflight = threading.Event()
+                self._inflight[host] = inflight
+                leader = True
+            else:
+                leader = False
+        if not leader:
+            inflight.wait(timeout=30)   # 等待首个线程抓完
+            with self._lock:
+                hit = self._cache.get(host)
+                return hit[1] if hit else None
+
+        # 本线程是 leader: 真正抓取
+        try:
+            rules = self._fetch_rules(host)
+        finally:
+            with self._lock:
+                self._inflight.pop(host, None)
+                inflight.set()         # 唤醒所有等待线程(抓取失败也会 set)
+        return rules
+
+    def _fetch_rules(self, host: str) -> Optional[Dict[str, RobotsRule]]:
+        """真正发起 robots.txt 抓取(由 _rules_for 的 leader 调用)。"""
+        now = time.time()
         # host 来自 _host(), 形如 "https://example.com"(带 scheme, 作为缓存键)。
         # 这里必须剥掉原 scheme 只留 netloc, 否则拼出 "http://https://..."
         # 双重前缀, 被 SSRF 校验拦下 -> 生产环境永远抓不到 robots.txt(全部放行)。
@@ -115,11 +167,13 @@ class RobotsCache:
                 resp = self._fetcher(f"{scheme}://{netloc}/robots.txt")
                 if resp and resp.status_code == 200 and resp.text:
                     parsed = self._parse(resp.text)
-                    self._cache[host] = (now, parsed)
+                    with self._lock:
+                        self._cache[host] = (now, parsed)
                     return parsed
             except Exception:
                 continue
-        self._cache[host] = (now, None)   # 抓不到 -> 放行
+        with self._lock:
+            self._cache[host] = (now, None)   # 抓不到 -> 放行
         return None
 
     @staticmethod

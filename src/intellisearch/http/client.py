@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import random
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -342,7 +343,11 @@ class HttpClient:
             if ct == "application/pdf":
                 return False   # PDF 属于文档, 走文件解析链路
             return True
-        ext = url.rsplit(".", 1)[-1].lower() if "." in url else ""
+        # 只看 path 的扩展名: 若直接从整个 URL 取, 查询串会污染结果
+        # (banner.png?size=large → "png?size=large" 不在白名单, 过滤失效)。
+        import os as _os
+        path = urlparse(url).path
+        ext = _os.path.splitext(path)[1].lstrip(".").lower()
         return ext in ("png", "jpg", "jpeg", "gif", "webp", "svg", "mp4", "webm",
                        "mp3", "woff", "woff2", "ttf", "otf", "css", "js", "ico")
 
@@ -384,14 +389,18 @@ class HttpClient:
         return out
 
 
+# 编码探测预编译(每个响应都会调用, 提到模块级省去反复 re.search 的缓存查找)
+_CHARSET_CT_RE = re.compile(r"charset=([\w-]+)", re.I)
+_CHARSET_BODY_RE = re.compile(r'charset=["\']?([\w-]+)', re.I)
+
+
 def _detect_encoding(headers, raw: bytes) -> Optional[str]:
-    import re as _re
     ct = headers.get("content-type", "")
-    m = _re.search(r"charset=([\w-]+)", ct, _re.I)
+    m = _CHARSET_CT_RE.search(ct)
     if m:
         return m.group(1)
     head = raw[:2048].decode("ascii", errors="ignore")
-    m = _re.search(r'charset=["\']?([\w-]+)', head, _re.I)
+    m = _CHARSET_BODY_RE.search(head)
     if m:
         return m.group(1)
     return None

@@ -306,11 +306,20 @@ class SearchResponse:
         if self.conflicts:
             payload["conflicts"] = self.conflicts
         if max_chars:
-            s = json.dumps(payload, ensure_ascii=False)
-            if len(s) > max_chars:
-                # 逐条裁剪, 保证条数优先于长度
-                while payload["results"] and len(json.dumps(payload, ensure_ascii=False)) > max_chars:
-                    payload["results"].pop()
+            def fits(k: int) -> bool:
+                payload["results"] = results[:k]
+                return len(json.dumps(payload, ensure_ascii=False)) <= max_chars
+            results = payload["results"]
+            if not fits(len(results)):
+                # 二分找满足预算的最大条数: 从 O(n) 次全量 dump 降到 O(log n)
+                lo, hi = 0, len(results)
+                while lo < hi:
+                    mid = (lo + hi + 1) // 2
+                    if fits(mid):
+                        lo = mid
+                    else:
+                        hi = mid - 1
+                payload["results"] = results[:lo]
                 payload["truncated"] = True
         return payload
 

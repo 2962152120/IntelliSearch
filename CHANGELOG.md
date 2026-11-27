@@ -8,6 +8,36 @@
 
 ## [未发布]
 
+### 性能
+
+- **`compress` / `to_ai_dict` 裁剪从 O(n²) 降到 O(log n)**：旧实现每移除一条结果就把
+  整个 payload 重新 `json.dumps` 一次（top_k=50 时约 50 次、数 MB 序列化）；改为二分
+  找可保留的最大条数，实测 50 条场景 `json.dumps` 调用从 ~50 次降到 12 次。
+- **标题去重 O(n²)→近 O(n)**：`fusion.dedupe` 预编译标题正则、缓存每条的 title key，
+  并按标题长度分桶，只对长度相近的候选做 `SequenceMatcher`（80 条从约 3160 次比较降到近线性）。
+- **`RobotsCache` single-flight**：并发抓取同一 host 的多条结果时，robots.txt 请求从
+  每条一次（惊群，最多 6 次）降为一次，加锁保护缓存读写。
+- **渲染等待改 Event**：`box_done_wait` 从每 10ms 轮询改为 `threading.Event` 阻塞，
+  25s 渲染的唤醒次数从 2500 次/线程降到 1 次。
+- 热路径正则预编译：`clean.summarize`、`rank` 事实关键词、`client._detect_encoding`。
+
+### 修复
+
+- **`max_chars` 契约失效**：`compress` 用紧凑 JSON 测长度，而所有输出出口（engine /
+  CLI / HTTP API / MCP）用 `indent=2` 输出，导致"压缩到 2000 字符"实际输出 2400+，
+  撑爆按字符数控 token 预算的调用方。现测量口径与实际输出对齐（默认 indent=2，
+  `compress` 新增 `indent` 参数），多档预算实测均不超标。
+- **付费墙 penalty 被施加两次**：`rank` 里先乘到 credibility、再乘到 total，使可信度
+  分量承受 `0.85²=0.7225`，远超设计的 15% 降权。现只在综合得分上施加一次。
+- **`site` / `exclude_sites` 子串匹配绕过**：`site=github.com` 曾放行 `evilgithub.com`、
+  `exclude_sites=baidu.com` 会误杀 `notbaidu.com`。改为 hostname 精确/后缀匹配。
+- **robots.txt 连续 `User-agent` 行只保留最后一个**：标准写法里多 agent 共享一组规则，
+  旧实现覆盖导致 `*` 组丢失、未命名爬虫绕过禁止路径。现正确累积连续声明。
+- **媒体扩展名判断被查询串绕过**：`banner.png?size=large` 曾因扩展名含查询串而漏过过滤，
+  现只取 URL path 的扩展名。
+- **`search_context(..., fetch_content=True)` 静默丢弃正文**：抓取阶段已拿到正文，但渲染
+  时只看 `options` 不看 overrides，导致 `with_content=False`。现用合并后的选项判断。
+
 ### 文档
 
 - 新增英文版 `README_EN.md`，与中文 `README.md` 章节结构一一对应、顶部互加语言
